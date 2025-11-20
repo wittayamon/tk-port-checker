@@ -94,16 +94,20 @@ Output EXE will be found in:
 dist/MultiPortChecker.exe
 ```
 
+## 🎥 Demo GIF
+
+> ตัวอย่างการทำงานของโปรแกรม (Add your GIF here)
+
+![Demo](demo.gif)
+
 ---
 
 ## 🖼 Screenshot
-*(Add your screenshot here)*
 
-```
+> ภาพหน้าจอหลักของโปรแกรม
+
 ![App Screenshot](screenshot.png)
-```
 
----
 
 ## 🧩 File Structure
 ```
