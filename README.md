@@ -70,7 +70,8 @@ venv\Scripts\activate
 
 ### 3. Install Dependencies
 *(This project uses only built-in Python modules — no external requirements.)*
-
+``[![Downloads](https://img.shields.io/badge/Download-EXE-brightgreen?style=for-the-badge)](https://github.com/wittayamon/tk-port-checker/releases/download/v1.0.0/MultiPortChecker.exe)
+```
 ---
 
 ## 🖥 Running the Application
@@ -106,7 +107,7 @@ dist/MultiPortChecker.exe
 
 > ภาพหน้าจอหลักของโปรแกรม
 
-![App Screenshot](screenshot.png)
+![Screenshot](screenshot.png)
 
 
 ## 🧩 File Structure
