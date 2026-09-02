@@ -4,6 +4,8 @@ A Windows-friendly Tkinter desktop application for monitoring ICMP Ping latency 
 
 The Ping and TCP results are independent: a host can respond to Ping while its configured TCP port is offline, or block Ping while its TCP service remains online.
 
+[![Download EXE](https://img.shields.io/badge/Download-MultiPortChecker.exe-brightgreen?style=for-the-badge)](https://github.com/wittayamon/tk-port-checker/releases/latest/download/MultiPortChecker.exe)
+
 ## Features
 
 - Add and remove Host/IP + TCP Port targets
