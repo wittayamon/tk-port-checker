@@ -1,31 +1,62 @@
 import os
 import sys
-import socket
+import json
 import tkinter as tk
-from tkinter import ttk, messagebox
+from concurrent.futures import ThreadPoolExecutor
+from tkinter import ttk, messagebox, filedialog
 
-# flag สำหรับ auto refresh
+from network_checks import (
+    CHECK_WORKERS,
+    IPv4ScanPlan,
+    check_target,
+    normalize_target_key,
+)
+
+# ===================== Global flags =====================
+
 auto_running = False
+check_in_progress = False
+auto_after_id = None
+active_checks = []
+scan_running = False
+scan_plan = None
+scan_port = 0
+scan_pending = {}
+scan_completed = 0
+scan_show_all = False
+transient_scan_items = set()
+
+network_executor = ThreadPoolExecutor(max_workers=CHECK_WORKERS, thread_name_prefix="network-check")
+current_theme = "light"   # "light" หรือ "dark"
+
+# ไฟล์ config สำหรับจำ theme + host list
+CONFIG_NAME = "mpc_config.json"
+
+
+# ===================== Helper =====================
+
+def get_app_dir() -> str:
+    """ตำแหน่งโฟลเดอร์โปรแกรม (รองรับทั้ง .py และ .exe)"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_config_path() -> str:
+    return os.path.join(get_app_dir(), CONFIG_NAME)
+
+
 def resource_path(relative_path: str) -> str:
-    """ใช้หา path ไฟล์เวลา run จาก .py และจาก .exe (PyInstaller)"""
+    """ใช้หา path resource ตอน run จาก .py หรือ .exe (อ่าน icon)"""
     try:
         base_path = sys._MEIPASS  # type: ignore[attr-defined]
     except Exception:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
-# ฟังก์ชันตรวจสอบ host:port ทีละตัว
-def check_single_host_port(host: str, port: int) -> bool:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.5)
-    try:
-        s.connect((host, port))
-        s.close()
-        return True
-    except Exception:
-        return False
 
-# กดปุ่ม Add -> เพิ่มรายการเข้า Table
+# ===================== Logic: add / remove / update =====================
+
 def add_target():
     host = entry_host.get().strip()
     port_text = entry_port.get().strip()
@@ -40,10 +71,17 @@ def add_target():
 
     port = int(port_text)
 
-    # เพิ่มเข้า Treeview
-    tree.insert("", "end", values=(host, port, "Not checked"), tags=("unknown",))
+    existing_item = find_existing_target(host, port)
+    if existing_item is not None:
+        transient_scan_items.discard(existing_item)
+        tree.selection_set(existing_item)
+        tree.focus(existing_item)
+        tree.see(existing_item)
+        return
 
-# ลบรายการที่เลือก
+    tree.insert("", "end", values=(host, port, "N/A", "Not checked"), tags=("unknown",))
+
+
 def remove_selected():
     selected = tree.selection()
     if not selected:
@@ -51,117 +89,578 @@ def remove_selected():
         return
 
     for item in selected:
+        transient_scan_items.discard(item)
         tree.delete(item)
 
-# เช็คทุก Host/Port ในลิสต์
+
+def find_existing_target(host: str, port: int):
+    """Find an existing row by normalized Host/IP + Port."""
+    wanted_key = normalize_target_key(host, port)
+    for item_id in tree.get_children():
+        values = tree.item(item_id, "values")
+        if len(values) < 2:
+            continue
+        try:
+            existing_key = normalize_target_key(str(values[0]), int(values[1]))
+        except (TypeError, ValueError):
+            continue
+        if existing_key == wanted_key:
+            return item_id
+    return None
+
+
+def update_row_status(item_id: str, host: str, port: int, ping_text: str, ok: bool):
+    """Apply a completed result on Tk's main thread."""
+    if not tree.exists(item_id):
+        return
+    values = tree.item(item_id, "values")
+    if len(values) < 2 or values[0] != host or str(values[1]) != str(port):
+        return
+
+    status_text = "✅ ONLINE" if ok else "❌ OFFLINE"
+    tag = "online" if ok else "offline"
+    tree.item(item_id, values=(host, port, ping_text, status_text), tags=(tag,))
+
+
+def finish_check_cycle():
+    global check_in_progress, active_checks
+    check_in_progress = False
+    active_checks = []
+    btn_check_sel.config(state="normal")
+    btn_check_all.config(state="normal")
+    if auto_running and auto_after_id is None:
+        schedule_next_auto()
+
+
+def poll_check_cycle():
+    """Poll futures and update widgets only from Tk's event loop."""
+    if any(not future.done() for _item, _host, _port, future in active_checks):
+        root.after(50, poll_check_cycle)
+        return
+
+    for item_id, host, port, future in active_checks:
+        try:
+            ping_text, port_online = future.result()
+        except Exception:
+            ping_text, port_online = "Timeout", False
+        update_row_status(item_id, host, port, ping_text, port_online)
+    finish_check_cycle()
+
+
+def start_check_cycle(item_ids) -> bool:
+    """Capture UI values, then submit a bounded set of background checks."""
+    global check_in_progress, active_checks
+    if check_in_progress or scan_running:
+        return False
+
+    targets = []
+    for item_id in item_ids:
+        values = tree.item(item_id, "values")
+        if len(values) < 2:
+            continue
+        host, port_text = str(values[0]), values[1]
+        try:
+            port = int(port_text)
+        except (TypeError, ValueError):
+            continue
+        targets.append((item_id, host, port))
+
+    if not targets:
+        return False
+
+    check_in_progress = True
+    btn_check_sel.config(state="disabled")
+    btn_check_all.config(state="disabled")
+    active_checks = [
+        (item_id, host, port, network_executor.submit(check_target, host, port))
+        for item_id, host, port in targets
+    ]
+    root.after(50, poll_check_cycle)
+    return True
+
+
 def check_all():
     items = tree.get_children()
     if not items:
         messagebox.showinfo("Check All", "ยังไม่มีรายการให้เช็ค")
         return
 
-    for item in items:
-        host, port_text, _status = tree.item(item, "values")
-        try:
-            port = int(port_text)
-        except ValueError:
-            continue
+    start_check_cycle(items)
 
-        ok = check_single_host_port(host, port)
-        if ok:
-            new_status = "✅ ONLINE"
-            tag = "online"
-        else:
-            new_status = "❌ OFFLINE"
-            tag = "offline"
 
-        tree.item(item, values=(host, port, new_status), tags=(tag,))
-
-# เช็คเฉพาะรายการที่เลือก
 def check_selected():
     selected = tree.selection()
     if not selected:
         messagebox.showinfo("Check Selected", "กรุณาเลือกรายการที่ต้องการเช็ค")
         return
 
-    for item in selected:
-        host, port_text, _status = tree.item(item, "values")
-        try:
-            port = int(port_text)
-        except ValueError:
-            continue
+    start_check_cycle(selected)
 
-        ok = check_single_host_port(host, port)
-        if ok:
-            new_status = "✅ ONLINE"
-            tag = "online"
-        else:
-            new_status = "❌ OFFLINE"
-            tag = "offline"
 
-        tree.item(item, values=(host, port, new_status), tags=(tag,))
+# ===================== IPv4 Range Scan =====================
 
-# ===== ส่วน Auto Refresh =====
-def start_auto():
-    global auto_running
-    # อ่านค่า interval
-    interval_text = entry_interval.get().strip()
-    if not interval_text.isdigit():
-        messagebox.showwarning("Interval Error", "Interval ต้องเป็นตัวเลข (วินาที)")
+def set_scan_controls(running: bool):
+    btn_scan.config(state="disabled" if running else "normal")
+    btn_cancel_scan.config(state="normal" if running else "disabled")
+    btn_check_sel.config(state="disabled" if running else "normal")
+    btn_check_all.config(state="disabled" if running else "normal")
+    btn_start_auto.config(state="disabled" if running else "normal")
+    btn_add.config(state="disabled" if running else "normal")
+    btn_remove.config(state="disabled" if running else "normal")
+    btn_load.config(state="disabled" if running else "normal")
+
+
+def update_scan_progress(prefix: str = "Scanning"):
+    lbl_scan_progress.config(text=f"{prefix} {scan_completed} / {scan_plan.total}")
+
+
+def apply_scan_result(host: str, port: int, ping_text: str, port_online: bool):
+    """Update a duplicate row or add a transient discovery result."""
+    if not scan_show_all and ping_text == "Timeout" and not port_online:
         return
 
-    if int(interval_text) <= 0:
-        messagebox.showwarning("Interval Error", "Interval ต้องมากกว่า 0 วินาที")
+    item_id = find_existing_target(host, port)
+    if item_id is None:
+        item_id = tree.insert(
+            "",
+            "end",
+            values=(host, port, ping_text, "Not checked"),
+            tags=("unknown",),
+        )
+        transient_scan_items.add(item_id)
+    update_row_status(item_id, host, port, ping_text, port_online)
+
+
+def submit_scan_work():
+    """Keep only one bounded worker-window scheduled at a time."""
+    available_slots = CHECK_WORKERS - len(scan_pending)
+    for host in scan_plan.take(available_slots):
+        future = network_executor.submit(check_target, host, scan_port)
+        scan_pending[future] = host
+
+
+def poll_range_scan():
+    global scan_completed
+    completed_futures = [future for future in tuple(scan_pending) if future.done()]
+    for future in completed_futures:
+        host = scan_pending.pop(future)
+        if future.cancelled():
+            continue
+
+        scan_completed += 1
+        try:
+            ping_text, port_online = future.result()
+        except Exception:
+            ping_text, port_online = "Timeout", False
+
+        if not scan_plan.cancelled:
+            apply_scan_result(host, scan_port, ping_text, port_online)
+
+    if not scan_plan.cancelled:
+        submit_scan_work()
+        update_scan_progress()
+
+    if scan_pending:
+        root.after(50, poll_range_scan)
+        return
+
+    if scan_plan.cancelled:
+        finish_range_scan(cancelled=True)
+    elif scan_plan.exhausted:
+        finish_range_scan(cancelled=False)
+    else:
+        root.after(50, poll_range_scan)
+
+
+def start_range_scan():
+    global scan_running, scan_plan, scan_port, scan_pending
+    global scan_completed, scan_show_all
+
+    if scan_running:
+        return
+    if check_in_progress or auto_running:
+        messagebox.showwarning(
+            "IP Range Scan",
+            "Stop Auto Refresh and wait for the current check to finish before scanning.",
+        )
+        return
+
+    port_text = entry_scan_port.get().strip()
+    if not port_text.isdigit() or not 1 <= int(port_text) <= 65535:
+        messagebox.showwarning("IP Range Scan", "Port must be between 1 and 65535.")
+        return
+
+    try:
+        new_plan = IPv4ScanPlan.from_range(
+            entry_start_ip.get().strip(),
+            entry_end_ip.get().strip(),
+        )
+    except ValueError as exc:
+        messagebox.showwarning("IP Range Scan", str(exc))
+        return
+
+    scan_running = True
+    scan_plan = new_plan
+    scan_port = int(port_text)
+    scan_pending = {}
+    scan_completed = 0
+    scan_show_all = bool(show_all_scanned_var.get())
+    set_scan_controls(True)
+    update_scan_progress()
+    submit_scan_work()
+    root.after(50, poll_range_scan)
+
+
+def cancel_range_scan():
+    if not scan_running or scan_plan is None:
+        return
+    scan_plan.cancel()
+    btn_cancel_scan.config(state="disabled")
+    lbl_scan_progress.config(text=f"Cancelling {scan_completed} / {scan_plan.total}")
+    for future in tuple(scan_pending):
+        future.cancel()
+
+
+def finish_range_scan(cancelled: bool):
+    global scan_running, scan_pending
+    scan_running = False
+    scan_pending = {}
+    set_scan_controls(False)
+    prefix = "Cancelled" if cancelled else "Completed"
+    update_scan_progress(prefix)
+
+
+# ===================== Save / Load Host List (ปุ่ม) =====================
+
+def save_host_list():
+    items = tree.get_children()
+    if not items:
+        messagebox.showinfo("Save List", "ยังไม่มีรายการให้บันทึก")
+        return
+
+    data = []
+    for item in items:
+        host, port, _ping, _status = tree.item(item, "values")
+        try:
+            port_int = int(port)
+        except ValueError:
+            port_int = port
+        data.append({"host": host, "port": port_int})
+
+    path = filedialog.asksaveasfilename(
+        defaultextension=".json",
+        filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        title="Save host list",
+    )
+    if not path:
+        return
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        messagebox.showinfo("Save List", "บันทึกรายการเรียบร้อยแล้ว")
+    except Exception as e:
+        messagebox.showerror("Save List", f"เกิดข้อผิดพลาดในการบันทึกไฟล์:\n{e}")
+
+
+def load_host_list():
+    path = filedialog.askopenfilename(
+        filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        title="Load host list",
+    )
+    if not path:
+        return
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        messagebox.showerror("Load List", f"ไม่สามารถอ่านไฟล์ได้:\n{e}")
+        return
+
+    # ล้างของเดิม
+    transient_scan_items.clear()
+    for item in tree.get_children():
+        tree.delete(item)
+
+    # เพิ่มใหม่
+    for entry in data:
+        host = str(entry.get("host", "")).strip()
+        port = entry.get("port", "")
+        if not host:
+            continue
+        tree.insert("", "end", values=(host, port, "N/A", "Not checked"), tags=("unknown",))
+
+
+# ===================== Config: auto-save theme + hosts =====================
+
+def save_config():
+    """บันทึก theme + host list ลงไฟล์ config"""
+    items = tree.get_children()
+    hosts = []
+    for item in items:
+        if item in transient_scan_items:
+            continue
+        host, port, _ping, _status = tree.item(item, "values")
+        try:
+            port_int = int(port)
+        except ValueError:
+            port_int = port
+        hosts.append({"host": host, "port": port_int})
+
+    config = {
+        "theme": current_theme,
+        "hosts": hosts,
+    }
+
+    try:
+        with open(get_config_path(), "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        # ไม่ต้องขึ้น popup เพราะเป็นตอนปิดโปรแกรม
+        print("Save config error:", e)
+
+
+def load_config():
+    """อ่าน config ถ้ามี แล้ว set theme + เติม host list ให้"""
+    global current_theme
+    path = get_config_path()
+    if not os.path.exists(path):
+        return
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception as e:
+        print("Load config error:", e)
+        return
+
+    # theme
+    theme = config.get("theme")
+    if theme in ("light", "dark"):
+        current_theme = theme
+
+    # hosts
+    hosts = config.get("hosts", [])
+    for entry in hosts:
+        host = str(entry.get("host", "")).strip()
+        port = entry.get("port", "")
+        if not host:
+            continue
+        tree.insert("", "end", values=(host, port, "N/A", "Not checked"), tags=("unknown",))
+
+
+def on_close():
+    """เรียกตอนกดปิดหน้าต่าง"""
+    global auto_running
+    auto_running = False
+    if scan_running and scan_plan is not None:
+        scan_plan.cancel()
+        for future in tuple(scan_pending):
+            future.cancel()
+    if auto_after_id is not None:
+        try:
+            root.after_cancel(auto_after_id)
+        except tk.TclError:
+            pass
+    save_config()
+    network_executor.shutdown(wait=False, cancel_futures=True)
+    root.destroy()
+
+
+# ===================== Auto Refresh =====================
+
+def start_auto():
+    global auto_running, auto_after_id
+    if scan_running:
+        return
+    interval_text = entry_interval.get().strip()
+    if not interval_text.isdigit() or int(interval_text) <= 0:
+        messagebox.showwarning("Interval Error", "Interval must be a number greater than 0 seconds")
         return
 
     auto_running = True
+    if auto_after_id is not None:
+        root.after_cancel(auto_after_id)
+        auto_after_id = None
     btn_start_auto.config(state="disabled")
     btn_stop_auto.config(state="normal")
-    auto_loop()  # เริ่ม loop
+    auto_loop()
+
 
 def stop_auto():
-    global auto_running
+    global auto_running, auto_after_id
     auto_running = False
+    if auto_after_id is not None:
+        root.after_cancel(auto_after_id)
+        auto_after_id = None
     btn_start_auto.config(state="normal")
     btn_stop_auto.config(state="disabled")
 
+
 def auto_loop():
-    """ฟังก์ชันที่จะถูกเรียกซ้ำด้วย after()"""
+    global auto_after_id
+    auto_after_id = None
     if not auto_running:
         return
+    if check_in_progress:
+        auto_after_id = root.after(100, auto_loop)
+        return
 
-    # เช็คทุก host
-    check_all()
+    items = tree.get_children()
+    if items and start_check_cycle(items):
+        return
+    schedule_next_auto()
 
-    # อ่าน interval อีกครั้ง เผื่อผู้ใช้เปลี่ยนค่า
-    interval_text = entry_interval.get().strip()
+
+def schedule_next_auto():
+    global auto_after_id
+    if not auto_running:
+        return
     try:
-        interval_sec = int(interval_text)
+        interval_sec = int(entry_interval.get().strip())
     except ValueError:
-        interval_sec = 5  # fallback
+        interval_sec = 5
+    auto_after_id = root.after(max(1, interval_sec) * 1000, auto_loop)
 
-    # แปลงวินาที -> มิลลิวินาที
-    root.after(interval_sec * 1000, auto_loop)
 
-# ===== สร้างหน้าต่างหลัก =====
+# ===================== Theme =====================
+
+def toggle_theme():
+    global current_theme
+    current_theme = "dark" if current_theme == "light" else "light"
+    btn_theme.config(text="Light Mode" if current_theme == "dark" else "Dark Mode")
+    apply_theme(current_theme)
+
+
+def apply_theme(theme: str):
+    """
+    เปลี่ยนสีทั้งหมดของหน้า UI ตาม theme: light/dark
+    """
+    if theme == "dark":
+        bg = "#2b2b2b"
+        fg = "#f0f0f0"
+        widget_bg = "#3c3f41"
+        button_bg = "#4c5052"
+        entry_bg = "#3c3f41"
+        entry_fg = "#ffffff"
+        tree_bg = "#3c3f41"
+        tree_fg = "#f0f0f0"
+        online_bg = "#2e7d32"
+        offline_bg = "#c62828"
+        unknown_bg = "#616161"
+    else:
+        bg = "#f0f0f0"
+        fg = "black"
+        widget_bg = "#f0f0f0"
+        button_bg = "#e0e0e0"
+        entry_bg = "white"
+        entry_fg = "black"
+        tree_bg = "white"
+        tree_fg = "black"
+        online_bg = "green"
+        offline_bg = "red"
+        unknown_bg = "lightgray"
+
+    # พื้นหลังหลัก
+    root.configure(bg=bg)
+    frame_top.configure(bg=bg)
+    frame_table.configure(bg=bg)
+    frame_scan.configure(bg=bg)
+    frame_bottom.configure(bg=bg)
+
+    # label
+    for lbl in (
+        lbl_host,
+        lbl_port,
+        lbl_interval,
+        lbl_start_ip,
+        lbl_end_ip,
+        lbl_scan_port,
+        lbl_scan_progress,
+    ):
+        lbl.configure(bg=bg, fg=fg)
+
+    # entry
+    for ent in (
+        entry_host,
+        entry_port,
+        entry_interval,
+        entry_start_ip,
+        entry_end_ip,
+        entry_scan_port,
+    ):
+        ent.configure(bg=entry_bg, fg=entry_fg, insertbackground=entry_fg)
+
+    chk_show_all.configure(
+        bg=bg,
+        fg=fg,
+        selectcolor=entry_bg,
+        activebackground=bg,
+        activeforeground=fg,
+    )
+
+    # button
+    for btn in (
+        btn_add,
+        btn_remove,
+        btn_check_sel,
+        btn_check_all,
+        btn_start_auto,
+        btn_stop_auto,
+        btn_save,
+        btn_load,
+        btn_theme,
+        btn_scan,
+        btn_cancel_scan,
+    ):
+        btn.configure(bg=button_bg, fg=fg, activebackground=button_bg, activeforeground=fg)
+
+    # Treeview style
+    style = ttk.Style()
+    style.configure(
+        "Custom.Treeview",
+        background=tree_bg,
+        foreground=tree_fg,
+        fieldbackground=tree_bg,
+        bordercolor=widget_bg,
+        borderwidth=0,
+    )
+    style.configure(
+        "Custom.Treeview.Heading",
+        background=widget_bg,
+        foreground=fg,
+    )
+    tree.configure(style="Custom.Treeview")
+
+    # tag สีแถว
+    tree.tag_configure("online", background=online_bg, foreground="white")
+    tree.tag_configure("offline", background=offline_bg, foreground="white")
+    tree.tag_configure("unknown", background=unknown_bg, foreground=fg)
+
+
+# ===================== GUI =====================
+
 root = tk.Tk()
-root.title("Multi Host Port Checker")
+root.title("Multi Host Port Checker (with Ping)")
+root.geometry("900x620")
+root.resizable(False, False)
 
+# icon (ถ้ามีไฟล์ก็ใช้ ถ้าไม่มีจะข้ามไป)
 try:
     icon_path = resource_path("icon_network_transparent.ico")
     root.iconbitmap(icon_path)
 except Exception:
     pass
 
-
-# ===== ส่วนบน: กรอก Host / Port + ปุ่ม Add / Remove =====
+# ---- ส่วนบน: กรอก Host / Port ----
 frame_top = tk.Frame(root)
 frame_top.pack(pady=10, padx=10, fill="x")
 
 lbl_host = tk.Label(frame_top, text="Host / IP:")
 lbl_host.grid(row=0, column=0, padx=(0, 5))
 
-entry_host = tk.Entry(frame_top, width=25)
+entry_host = tk.Entry(frame_top, width=30)
 entry_host.grid(row=0, column=1, padx=(0, 10))
 entry_host.insert(0, "google.com")
 
@@ -170,32 +669,30 @@ lbl_port.grid(row=0, column=2, padx=(0, 5))
 
 entry_port = tk.Entry(frame_top, width=8)
 entry_port.grid(row=0, column=3, padx=(0, 10))
-entry_port.insert(0, "80")
+entry_port.insert(0, "443")
 
-btn_add = tk.Button(frame_top, text="Add", command=add_target, width=10)
+btn_add = tk.Button(frame_top, text="Add", width=10, command=add_target)
 btn_add.grid(row=0, column=4, padx=(0, 5))
 
-btn_remove = tk.Button(frame_top, text="Remove Selected", command=remove_selected, width=15)
+btn_remove = tk.Button(frame_top, text="Remove Selected", width=15, command=remove_selected)
 btn_remove.grid(row=0, column=5)
 
-# ===== ส่วนกลาง: ตารางแสดง Host / Port / Status =====
+# ---- ตาราง ----
 frame_table = tk.Frame(root)
 frame_table.pack(pady=5, padx=10, fill="both", expand=True)
 
-columns = ("host", "port", "status")
+columns = ("host", "port", "ping", "status")
+tree = ttk.Treeview(frame_table, columns=columns, show="headings", height=14)
 
-tree = ttk.Treeview(frame_table, columns=columns, show="headings", height=10)
 tree.heading("host", text="Host / IP")
 tree.heading("port", text="Port")
+tree.heading("ping", text="Ping (ms)")
 tree.heading("status", text="Status")
 
-tree.column("host", width=260)
+tree.column("host", width=300)
 tree.column("port", width=70, anchor="center")
+tree.column("ping", width=100, anchor="center")
 tree.column("status", width=220)
-
-tree.tag_configure("online", background="green", foreground="white")
-tree.tag_configure("offline", background="red", foreground="white")
-tree.tag_configure("unknown", background="lightgray", foreground="black")
 
 scrollbar_y = ttk.Scrollbar(frame_table, orient="vertical", command=tree.yview)
 tree.configure(yscrollcommand=scrollbar_y.set)
@@ -203,7 +700,60 @@ tree.configure(yscrollcommand=scrollbar_y.set)
 tree.pack(side="left", fill="both", expand=True)
 scrollbar_y.pack(side="right", fill="y")
 
-# ===== ส่วนล่าง: ปุ่ม Check + Auto Refresh =====
+tree.tag_configure("online", background="green", foreground="white")
+tree.tag_configure("offline", background="red", foreground="white")
+tree.tag_configure("unknown", background="lightgray", foreground="black")
+
+# ---- IPv4 range scan ----
+frame_scan = tk.Frame(root)
+frame_scan.pack(pady=5, padx=10, fill="x")
+
+lbl_start_ip = tk.Label(frame_scan, text="Start IP:")
+lbl_start_ip.grid(row=0, column=0, padx=(0, 5))
+
+entry_start_ip = tk.Entry(frame_scan, width=16)
+entry_start_ip.grid(row=0, column=1, padx=(0, 10))
+entry_start_ip.insert(0, "192.168.1.1")
+
+lbl_end_ip = tk.Label(frame_scan, text="End IP:")
+lbl_end_ip.grid(row=0, column=2, padx=(0, 5))
+
+entry_end_ip = tk.Entry(frame_scan, width=16)
+entry_end_ip.grid(row=0, column=3, padx=(0, 10))
+entry_end_ip.insert(0, "192.168.1.254")
+
+lbl_scan_port = tk.Label(frame_scan, text="Port:")
+lbl_scan_port.grid(row=0, column=4, padx=(0, 5))
+
+entry_scan_port = tk.Entry(frame_scan, width=7)
+entry_scan_port.grid(row=0, column=5, padx=(0, 10))
+entry_scan_port.insert(0, "443")
+
+btn_scan = tk.Button(frame_scan, text="Scan", width=10, command=start_range_scan)
+btn_scan.grid(row=0, column=6, padx=(0, 5))
+
+btn_cancel_scan = tk.Button(
+    frame_scan,
+    text="Cancel Scan",
+    width=12,
+    command=cancel_range_scan,
+    state="disabled",
+)
+btn_cancel_scan.grid(row=0, column=7)
+
+show_all_scanned_var = tk.BooleanVar(value=False)
+chk_show_all = tk.Checkbutton(
+    frame_scan,
+    text="Show all scanned IPs",
+    variable=show_all_scanned_var,
+)
+chk_show_all.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+lbl_scan_progress = tk.Label(frame_scan, text="Ready to scan")
+lbl_scan_progress.grid(row=1, column=3, columnspan=5, sticky="e", pady=(6, 0))
+frame_scan.grid_columnconfigure(7, weight=1)
+
+# ---- ด้านล่าง ----
 frame_bottom = tk.Frame(root)
 frame_bottom.pack(pady=10)
 
@@ -213,18 +763,33 @@ btn_check_sel.grid(row=0, column=0, padx=5)
 btn_check_all = tk.Button(frame_bottom, text="Check All", width=15, command=check_all)
 btn_check_all.grid(row=0, column=1, padx=5)
 
-# Interval + Auto buttons
 lbl_interval = tk.Label(frame_bottom, text="Interval (sec):")
 lbl_interval.grid(row=1, column=0, pady=(10, 0))
 
 entry_interval = tk.Entry(frame_bottom, width=8)
 entry_interval.grid(row=1, column=1, sticky="w", pady=(10, 0))
-entry_interval.insert(0, "5")  # ค่าเริ่มต้น 5 วินาที
+entry_interval.insert(0, "5")
 
 btn_start_auto = tk.Button(frame_bottom, text="Start Auto", width=15, command=start_auto)
 btn_start_auto.grid(row=1, column=2, padx=5, pady=(10, 0))
 
 btn_stop_auto = tk.Button(frame_bottom, text="Stop Auto", width=15, command=stop_auto, state="disabled")
 btn_stop_auto.grid(row=1, column=3, padx=5, pady=(10, 0))
+
+btn_save = tk.Button(frame_bottom, text="Save List", width=15, command=save_host_list)
+btn_save.grid(row=2, column=0, padx=5, pady=(10, 0))
+
+btn_load = tk.Button(frame_bottom, text="Load List", width=15, command=load_host_list)
+btn_load.grid(row=2, column=1, padx=5, pady=(10, 0))
+
+btn_theme = tk.Button(frame_bottom, text="Dark Mode", width=15, command=toggle_theme)
+btn_theme.grid(row=2, column=2, padx=5, pady=(10, 0))
+
+# โหลด config (theme + hosts) ก่อน apply_theme
+load_config()
+apply_theme(current_theme)
+
+# handle ตอนปิด
+root.protocol("WM_DELETE_WINDOW", on_close)
 
 root.mainloop()

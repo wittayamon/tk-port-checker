@@ -12,5 +12,9 @@ build/
 dist/
 *.spec
 
+# Local application data
+mpc_config.json
+p.json
+
 # VS Code
 .vscode/

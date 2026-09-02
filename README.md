@@ -1,159 +1,109 @@
 # Multi Host Port Checker
 
-![Screenshot](screenshot.png)
+A Windows-friendly Tkinter desktop application for monitoring ICMP Ping latency and TCP port availability across individual targets or IPv4 ranges.
 
-[![Python Version](https://img.shields.io/badge/python-3.9%2B-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]() [![Status](https://img.shields.io/badge/status-active-success)]()
+The Ping and TCP results are independent: a host can respond to Ping while its configured TCP port is offline, or block Ping while its TCP service remains online.
 
-A simple and efficient network monitoring tool built with **Python Tkinter**. This application allows you to add multiple hosts and ports, check their connectivity, and automatically refresh the status at defined intervals.
+## Features
 
----
+- Add and remove Host/IP + TCP Port targets
+- One-attempt Ping monitoring with latency, `Timeout`, or `Online` fallback
+- Socket-based TCP port checks with color-coded ONLINE/OFFLINE status
+- Check Selected and Check All
+- Non-overlapping Auto Refresh
+- Responsive background checks using a bounded worker pool
+- IPv4 Range Scan with progress and cancellation
+- Optional display of all scanned IPs
+- Duplicate Host/IP + Port rows are updated instead of added again
+- Save and load JSON host lists
+- Auto-load saved hosts and theme configuration
+- Dark and Light themes
+- PyInstaller-compatible icon and resource handling
 
-## 📌 Features (Enhanced)
-- Modernized layout with better spacing and cleaner alignment
-- Professional icon support for both app window and EXE
-- Real-time color-coded monitoring
-- Auto refresh engine with interval control
+## IPv4 Range Scan
 
-### ✔ Check Multiple Host/Port
-Add as many hosts as you want, each with a specific port.
+Enter an inclusive Start IP, End IP, and TCP Port, then select **Scan**. For example:
 
-### ✔ Auto Refresh (Interval)
-Automatically monitors all hosts every X seconds without freezing the UI.
-
-### ✔ Real-time Status
-- **Green** → ONLINE
-- **Red** → OFFLINE
-- **Gray** → Not checked yet
-
-### ✔ Add / Remove Hosts
-Simple UI to manage host list.
-
-### ✔ Portable EXE
-Built using PyInstaller — no need to install Python on target machines.
-
----
-
-## 🚀 Installation Guide
-
-### 1. Requirements
-- Python 3.9+
-- Windows OS (for EXE build)
-
-### 2. Clone Repository
-```bash
-git clone https://github.com/<your-username>/<repo-name>.git
-cd <repo-name>
+```text
+Start IP: 192.168.1.1
+End IP:   192.168.1.254
+Port:     443
 ```
 
-### 3. Setup Virtual Environment
-```bash
+The progress label reports values such as `Scanning 37 / 254`. **Cancel Scan** stops submitting new addresses immediately and cancels queued work; network calls already running are allowed to finish safely.
+
+By default, a scan adds or updates only targets where Ping responds or the TCP port is open. Enable **Show all scanned IPs** to include Ping-timeout/TCP-offline results as well. Newly discovered scan rows are runtime results and are not automatically written to the application config on exit. Use **Save List** if you intentionally want to export the visible rows.
+
+Ranges must contain valid IPv4 addresses, the end must not be lower than the start, and a scan is limited to 1,024 addresses. Stop Auto Refresh and allow any active check to finish before starting a range scan.
+
+## Status columns
+
+```text
+Host / IP | Port | Ping (ms) | Status
+```
+
+- Ping values include `7 ms`, `<1 ms`, `Timeout`, or `Online` if Ping succeeds but latency cannot be parsed.
+- ONLINE/OFFLINE always represents TCP port availability, not Ping availability.
+
+## Requirements
+
+- Python 3.9 or newer when running from source
+- Windows 10/11 is the primary target
+- No third-party runtime dependencies
+
+## Run from source
+
+```powershell
 python -m venv venv
 venv\Scripts\activate
-```
-
-### 4. Run the Application
-```bash
 python multi_port_checker.py
 ```
 
-### 1. Clone Repository
-```
-git clone https://github.com/<your-username>/<repo-name>.git
-cd <repo-name>
-```
+## Saved data
 
-### 2. Create Virtual Environment
-```
-python -m venv venv
-venv\Scripts\activate
-```
+Host lists remain compatible with the existing format:
 
-### 3. Install Dependencies
-*(This project uses only built-in Python modules — no external requirements.)*
-``[![Downloads](https://img.shields.io/badge/Download-EXE-brightgreen?style=for-the-badge)](https://github.com/wittayamon/tk-port-checker/releases/download/v1.0.0/MultiPortChecker.exe)
-```
----
-
-## 🖥 Running the Application
-```
-python multi_port_checker.py
+```json
+{
+  "host": "google.com",
+  "port": 443
+}
 ```
 
----
+Ping latency and TCP status are runtime values and are not required in saved files.
 
-## 📦 Build as EXE (Windows)
-Use PyInstaller:
-```
-pyinstaller --noconfirm --onefile --windowed \
-  --name MultiPortChecker \
-  --icon=icon_network_transparent.ico \
-  --add-data "icon_network_transparent.ico;." \
-  multi_port_checker.py
-```
-Output EXE will be found in:
-```
-dist/MultiPortChecker.exe
+## Build a Windows EXE
+
+Install PyInstaller in the build environment, then use the tracked spec file:
+
+```powershell
+pyinstaller --noconfirm MultiPortChecker.spec
 ```
 
-## 🎥 Demo GIF
+The executable is created at `dist\MultiPortChecker.exe`. Python is not required on the target computer.
 
-> ตัวอย่างการทำงานของโปรแกรม (Add your GIF here)
+## Project structure
 
-![Demo](demo.gif)
-
----
-
-## 🖼 Screenshot
-
-> ภาพหน้าจอหลักของโปรแกรม
-
-![Screenshot](screenshot.png)
-
-
-## 🧩 File Structure
-```
-project/
-│   multi_port_checker.py
-│   icon_network_transparent.ico
-│   README.md
-│   screenshot.png
-│   .gitignore
-│
-└── venv/                # Virtual environment
+```text
+multi_port_checker.py       Tkinter UI and background task coordination
+network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
+test_ping_helpers.py        Ping/TCP helper tests
+test_range_scan_helpers.py  IPv4 range, duplicate-key, and cancellation tests
+MultiPortChecker.spec       PyInstaller build configuration
+icon_network_transparent.ico
+README.md
+changelog.md
 ```
 
----
+## Tests
 
-## 🛣 Roadmap
-- [ ] Add Ping status alongside Port check
-- [ ] Export/Import host lists (.json)
-- [ ] Add system tray support
-- [ ] Sound notification when host goes offline
-- [ ] Dark/Light theme switching
-- [ ] Logging to external file
-
-```
-project/
-│   multi_port_checker.py
-│   icon_network_transparent.ico
-│   README.md
-│   .gitignore
-│
-└── venv/                # Virtual environment
+```powershell
+python -m unittest -v
+python -m py_compile multi_port_checker.py network_checks.py test_ping_helpers.py test_range_scan_helpers.py
 ```
 
----
+## Roadmap
 
-## 🤝 Contributing
-Pull requests are welcome! Open an issue first to discuss any major changes.
-
----
-
-## 📄 License
-This project is licensed under the MIT License.
-
----
-
-## ⭐ If you like this tool
-Give the repository a star to support future updates! 🌟
-
+- System tray support
+- Optional notifications when a monitored service changes state
+- External status logging
