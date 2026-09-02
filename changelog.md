@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased — recommended v1.2.0
+## v1.2.0 - 2026-09-02
 
 - Added inclusive IPv4 Range Scan controls for Start IP, End IP, and TCP Port.
 - Added bounded concurrent scanning with progress and cancellation.
