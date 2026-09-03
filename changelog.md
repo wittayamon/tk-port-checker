@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased — recommended v1.3.0
+## v1.3.0 - 2026-09-03
 
 - Added a Trace Route action for a selected Host/IP using Windows `tracert -d`.
 - Added streaming raw trace output in a responsive, themed Toplevel window.
