@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased — recommended v1.4.0
+## v1.4.0 - 2026-09-03
 
 - Added an optional Device Name column and input for monitored targets.
 - Added Edit Selected support for Device Name, Host/IP, and Port.
