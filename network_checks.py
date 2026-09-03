@@ -12,6 +12,56 @@ PING_TIMEOUT_MS = 1500
 PING_PROCESS_TIMEOUT_SECONDS = 3
 CHECK_WORKERS = min(16, max(4, (os.cpu_count() or 1) * 2))
 MAX_SCAN_ADDRESSES = 1024
+DEFAULT_TRACE_MAX_HOPS = 15
+DEFAULT_TRACE_TIMEOUT_MS = 1000
+MAX_TRACE_HOPS = 255
+MAX_TRACE_TIMEOUT_MS = 60000
+
+
+def validate_trace_max_hops(value) -> int:
+    """Return a valid Windows tracert hop limit."""
+    try:
+        max_hops = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Max Hops must be a whole number from 1 to 255") from exc
+    if not 1 <= max_hops <= MAX_TRACE_HOPS:
+        raise ValueError("Max Hops must be a whole number from 1 to 255")
+    return max_hops
+
+
+def validate_trace_timeout(value) -> int:
+    """Return a practical Windows tracert per-reply timeout in milliseconds."""
+    try:
+        timeout_ms = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Timeout must be a whole number from 1 to 60000 ms") from exc
+    if not 1 <= timeout_ms <= MAX_TRACE_TIMEOUT_MS:
+        raise ValueError("Timeout must be a whole number from 1 to 60000 ms")
+    return timeout_ms
+
+
+def normalize_trace_destination(host: str) -> str:
+    """Validate a hostname/IPv4 tracert argument without requiring DNS resolution."""
+    destination = str(host).strip()
+    if not destination:
+        raise ValueError("Trace destination must not be empty")
+    if destination.startswith("-") or any(character.isspace() for character in destination):
+        raise ValueError("Trace destination must be a hostname or IPv4 address")
+    if any(ord(character) < 32 for character in destination):
+        raise ValueError("Trace destination contains invalid characters")
+    return destination
+
+
+def build_tracert_command(
+    host: str,
+    max_hops=DEFAULT_TRACE_MAX_HOPS,
+    timeout_ms=DEFAULT_TRACE_TIMEOUT_MS,
+):
+    """Build a shell-free Windows tracert command for a hostname or IPv4 address."""
+    destination = normalize_trace_destination(host)
+    hops = validate_trace_max_hops(max_hops)
+    timeout = validate_trace_timeout(timeout_ms)
+    return ["tracert", "-d", "-h", str(hops), "-w", str(timeout), destination]
 
 
 def validate_ipv4_range(

@@ -1,13 +1,20 @@
 import os
 import sys
 import json
+import locale
+import queue
+import subprocess
+import threading
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk, messagebox, filedialog
 
 from network_checks import (
     CHECK_WORKERS,
+    DEFAULT_TRACE_MAX_HOPS,
+    DEFAULT_TRACE_TIMEOUT_MS,
     IPv4ScanPlan,
+    build_tracert_command,
     check_target,
     normalize_target_key,
 )
@@ -27,6 +34,8 @@ scan_show_all = False
 transient_scan_items = set()
 
 network_executor = ThreadPoolExecutor(max_workers=CHECK_WORKERS, thread_name_prefix="network-check")
+trace_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="trace-route")
+trace_windows = set()
 current_theme = "light"   # "light" หรือ "dark"
 
 # ไฟล์ config สำหรับจำ theme + host list
@@ -53,6 +62,14 @@ def resource_path(relative_path: str) -> str:
     except Exception:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
+
+
+def apply_window_icon(window) -> None:
+    """Apply the shared app icon without failing when the resource is unavailable."""
+    try:
+        window.iconbitmap(resource_path("icon_network_transparent.ico"))
+    except Exception:
+        pass
 
 
 # ===================== Logic: add / remove / update =====================
@@ -195,6 +212,355 @@ def check_selected():
         return
 
     start_check_cycle(selected)
+
+
+# ===================== Trace Route =====================
+
+class TraceRouteWindow:
+    """Stream one tracert process into a themed Toplevel without blocking Tk."""
+
+    def __init__(self, parent, host: str):
+        self.host = host
+        self.window = tk.Toplevel(parent)
+        apply_window_icon(self.window)
+        self.window.title(f"Trace Route - {host}")
+        self.window.geometry("760x500")
+        self.window.minsize(560, 360)
+
+        self._messages = queue.Queue()
+        self._process_lock = threading.Lock()
+        self._process = None
+        self._future = None
+        self._stop_event = None
+        self._run_id = 0
+        self._running = False
+        self._closed = False
+        self._poll_after_id = None
+
+        self.details_frame = tk.Frame(self.window)
+        self.details_frame.pack(fill="x", padx=10, pady=(10, 5))
+        self.destination_label = tk.Label(
+            self.details_frame, text=f"Destination: {host}", anchor="w"
+        )
+        self.destination_label.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        self.max_hops_label = tk.Label(self.details_frame, text="Max Hops:")
+        self.max_hops_label.grid(row=1, column=0, sticky="w")
+        self.max_hops_entry = tk.Entry(self.details_frame, width=8)
+        self.max_hops_entry.grid(row=1, column=1, sticky="w", padx=(5, 20))
+        self.max_hops_entry.insert(0, str(DEFAULT_TRACE_MAX_HOPS))
+
+        self.timeout_label = tk.Label(self.details_frame, text="Timeout (ms):")
+        self.timeout_label.grid(row=1, column=2, sticky="w")
+        self.timeout_entry = tk.Entry(self.details_frame, width=10)
+        self.timeout_entry.grid(row=1, column=3, sticky="w", padx=(5, 0))
+        self.timeout_entry.insert(0, str(DEFAULT_TRACE_TIMEOUT_MS))
+
+        self.output_frame = tk.Frame(self.window)
+        self.output_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        self.output_text = tk.Text(self.output_frame, wrap="none", state="disabled")
+        self.output_scroll_y = ttk.Scrollbar(
+            self.output_frame, orient="vertical", command=self.output_text.yview
+        )
+        self.output_scroll_x = ttk.Scrollbar(
+            self.output_frame, orient="horizontal", command=self.output_text.xview
+        )
+        self.output_text.configure(
+            yscrollcommand=self.output_scroll_y.set,
+            xscrollcommand=self.output_scroll_x.set,
+        )
+        self.output_text.grid(row=0, column=0, sticky="nsew")
+        self.output_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.output_scroll_x.grid(row=1, column=0, sticky="ew")
+        self.output_frame.grid_rowconfigure(0, weight=1)
+        self.output_frame.grid_columnconfigure(0, weight=1)
+
+        self.status_var = tk.StringVar(value="Ready")
+        self.status_label = tk.Label(self.window, textvariable=self.status_var, anchor="w")
+        self.status_label.pack(fill="x", padx=10)
+
+        self.button_frame = tk.Frame(self.window)
+        self.button_frame.pack(pady=(5, 10))
+        self.run_button = tk.Button(
+            self.button_frame, text="Run Again", width=12, command=self.run_trace
+        )
+        self.run_button.grid(row=0, column=0, padx=4)
+        self.stop_button = tk.Button(
+            self.button_frame,
+            text="Stop",
+            width=12,
+            state="disabled",
+            command=self.stop_trace,
+        )
+        self.stop_button.grid(row=0, column=1, padx=4)
+        self.copy_button = tk.Button(
+            self.button_frame, text="Copy", width=12, command=self.copy_output
+        )
+        self.copy_button.grid(row=0, column=2, padx=4)
+        self.close_button = tk.Button(
+            self.button_frame, text="Close", width=12, command=self.close
+        )
+        self.close_button.grid(row=0, column=3, padx=4)
+
+        trace_windows.add(self)
+        self.apply_theme(current_theme)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self._schedule_poll()
+        self.window.after_idle(self.run_trace)
+
+    def _schedule_poll(self):
+        if not self._closed:
+            self._poll_after_id = self.window.after(50, self._poll_messages)
+
+    def _poll_messages(self):
+        if self._closed:
+            return
+        try:
+            while True:
+                run_id, message_type, payload = self._messages.get_nowait()
+                if run_id != self._run_id:
+                    continue
+                if message_type == "line":
+                    if self._stop_event is None or not self._stop_event.is_set():
+                        self._append_output(payload)
+                elif message_type == "error":
+                    self._append_output(f"\nError: {payload}\n")
+                    self.status_var.set("Trace failed")
+                elif message_type == "done":
+                    self._finish_run(payload)
+        except queue.Empty:
+            pass
+        self._schedule_poll()
+
+    def _append_output(self, text: str):
+        if self._closed:
+            return
+        self.output_text.configure(state="normal")
+        self.output_text.insert("end", text)
+        self.output_text.see("end")
+        self.output_text.configure(state="disabled")
+
+    def _clear_output(self):
+        self.output_text.configure(state="normal")
+        self.output_text.delete("1.0", "end")
+        self.output_text.configure(state="disabled")
+
+    def run_trace(self):
+        if self._closed or self._running:
+            return
+        try:
+            command = build_tracert_command(
+                self.host, self.max_hops_entry.get(), self.timeout_entry.get()
+            )
+        except ValueError as exc:
+            self.status_var.set(str(exc))
+            messagebox.showwarning("Trace Route", str(exc), parent=self.window)
+            return
+
+        self._clear_output()
+        self._append_output(f"Command: {' '.join(command)}\n\n")
+        self._run_id += 1
+        run_id = self._run_id
+        self._stop_event = threading.Event()
+        self._running = True
+        self.status_var.set("Tracing...")
+        self.run_button.configure(state="disabled")
+        self.stop_button.configure(state="normal")
+        try:
+            self._future = trace_executor.submit(
+                self._trace_worker, run_id, command, self._stop_event
+            )
+        except RuntimeError as exc:
+            self._messages.put((run_id, "error", f"Unable to start trace: {exc}"))
+            self._messages.put((run_id, "done", "failed"))
+
+    def _trace_worker(self, run_id, command, stop_event):
+        process = None
+        try:
+            if stop_event.is_set():
+                self._messages.put((run_id, "done", "stopped"))
+                return
+
+            output_encoding = "oem" if os.name == "nt" else locale.getpreferredencoding(False)
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding=output_encoding,
+                errors="replace",
+                bufsize=1,
+                shell=False,
+                creationflags=(
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+                ),
+            )
+            with self._process_lock:
+                self._process = process
+
+            if stop_event.is_set():
+                self._terminate_process(process)
+
+            if process.stdout is not None:
+                for line in iter(process.stdout.readline, ""):
+                    if stop_event.is_set():
+                        break
+                    self._messages.put((run_id, "line", line))
+
+            if stop_event.is_set():
+                self._terminate_process(process)
+                result = "stopped"
+            else:
+                return_code = process.wait()
+                result = "completed" if return_code == 0 else "failed"
+                if return_code != 0:
+                    self._messages.put(
+                        (run_id, "line", f"\ntracert exited with code {return_code}.\n")
+                    )
+            self._messages.put((run_id, "done", result))
+        except FileNotFoundError:
+            self._messages.put(
+                (run_id, "error", "Windows tracert.exe is not available on this system.")
+            )
+            self._messages.put((run_id, "done", "failed"))
+        except (OSError, ValueError) as exc:
+            self._messages.put((run_id, "error", f"Unable to run tracert: {exc}"))
+            self._messages.put((run_id, "done", "failed"))
+        finally:
+            if process is not None:
+                if process.stdout is not None:
+                    process.stdout.close()
+                if process.poll() is None:
+                    self._terminate_process(process)
+                with self._process_lock:
+                    if self._process is process:
+                        self._process = None
+
+    @staticmethod
+    def _terminate_process(process):
+        if process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        except OSError:
+            pass
+
+    def _terminate_active_process(self):
+        with self._process_lock:
+            process = self._process
+        if process is not None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+
+    def stop_trace(self):
+        if not self._running or self._stop_event is None:
+            return
+        self._stop_event.set()
+        self.stop_button.configure(state="disabled")
+        self.status_var.set("Stopping trace...")
+        self._append_output("\nTrace stopped by user.\n")
+        if self._future is not None and self._future.cancel():
+            self._finish_run("stopped")
+            return
+        self._terminate_active_process()
+
+    def _finish_run(self, result: str):
+        if not self._running:
+            return
+        self._running = False
+        self.run_button.configure(state="normal")
+        self.stop_button.configure(state="disabled")
+        if result == "completed":
+            self.status_var.set("Trace completed")
+        elif result == "stopped":
+            self.status_var.set("Trace stopped")
+        else:
+            self.status_var.set("Trace failed; see output above")
+
+    def copy_output(self):
+        output = self.output_text.get("1.0", "end-1c")
+        if not output:
+            self.status_var.set("There is no trace output to copy")
+            return
+        self.window.clipboard_clear()
+        self.window.clipboard_append(output)
+        self.status_var.set("Trace output copied to clipboard")
+
+    def apply_theme(self, theme: str):
+        if self._closed:
+            return
+        palette = get_theme_palette(theme)
+        for frame in (self.details_frame, self.output_frame, self.button_frame):
+            frame.configure(bg=palette["bg"])
+        for label in (
+            self.destination_label,
+            self.max_hops_label,
+            self.timeout_label,
+            self.status_label,
+        ):
+            label.configure(bg=palette["bg"], fg=palette["fg"])
+        for entry in (self.max_hops_entry, self.timeout_entry):
+            entry.configure(
+                bg=palette["entry_bg"],
+                fg=palette["entry_fg"],
+                insertbackground=palette["entry_fg"],
+            )
+        for button in (
+            self.run_button, self.stop_button, self.copy_button, self.close_button
+        ):
+            button.configure(
+                bg=palette["button_bg"],
+                fg=palette["fg"],
+                activebackground=palette["button_bg"],
+                activeforeground=palette["fg"],
+            )
+        self.output_text.configure(
+            bg=palette["tree_bg"],
+            fg=palette["tree_fg"],
+            insertbackground=palette["entry_fg"],
+        )
+        self.window.configure(bg=palette["bg"])
+
+    def close(self):
+        if self._closed:
+            return
+        self.stop_trace()
+        self._closed = True
+        trace_windows.discard(self)
+        if self._poll_after_id is not None:
+            try:
+                self.window.after_cancel(self._poll_after_id)
+            except tk.TclError:
+                pass
+        try:
+            self.window.destroy()
+        except tk.TclError:
+            pass
+
+
+def open_trace_route():
+    selected = tree.selection()
+    if not selected:
+        messagebox.showinfo("Trace Route", "Please select a Host/IP first.")
+        return
+    if len(selected) != 1:
+        messagebox.showinfo("Trace Route", "Please select only one Host/IP.")
+        return
+    values = tree.item(selected[0], "values")
+    if not values or not str(values[0]).strip():
+        messagebox.showinfo("Trace Route", "Please select a valid Host/IP.")
+        return
+    TraceRouteWindow(root, str(values[0]).strip())
 
 
 # ===================== IPv4 Range Scan =====================
@@ -463,8 +829,11 @@ def on_close():
             root.after_cancel(auto_after_id)
         except tk.TclError:
             pass
+    for trace_window in tuple(trace_windows):
+        trace_window.close()
     save_config()
     network_executor.shutdown(wait=False, cancel_futures=True)
+    trace_executor.shutdown(wait=False, cancel_futures=True)
     root.destroy()
 
 
@@ -525,6 +894,28 @@ def schedule_next_auto():
 
 
 # ===================== Theme =====================
+
+def get_theme_palette(theme: str):
+    """Return shared colors for the main window and Trace Route windows."""
+    if theme == "dark":
+        return {
+            "bg": "#2b2b2b",
+            "fg": "#f0f0f0",
+            "button_bg": "#4c5052",
+            "entry_bg": "#3c3f41",
+            "entry_fg": "#ffffff",
+            "tree_bg": "#3c3f41",
+            "tree_fg": "#f0f0f0",
+        }
+    return {
+        "bg": "#f0f0f0",
+        "fg": "black",
+        "button_bg": "#e0e0e0",
+        "entry_bg": "white",
+        "entry_fg": "black",
+        "tree_bg": "white",
+        "tree_fg": "black",
+    }
 
 def toggle_theme():
     global current_theme
@@ -606,6 +997,7 @@ def apply_theme(theme: str):
         btn_remove,
         btn_check_sel,
         btn_check_all,
+        btn_trace,
         btn_start_auto,
         btn_stop_auto,
         btn_save,
@@ -638,6 +1030,9 @@ def apply_theme(theme: str):
     tree.tag_configure("offline", background=offline_bg, foreground="white")
     tree.tag_configure("unknown", background=unknown_bg, foreground=fg)
 
+    for trace_window in tuple(trace_windows):
+        trace_window.apply_theme(theme)
+
 
 # ===================== GUI =====================
 
@@ -645,13 +1040,7 @@ root = tk.Tk()
 root.title("Multi Host Port Checker (with Ping)")
 root.geometry("900x620")
 root.resizable(False, False)
-
-# icon (ถ้ามีไฟล์ก็ใช้ ถ้าไม่มีจะข้ามไป)
-try:
-    icon_path = resource_path("icon_network_transparent.ico")
-    root.iconbitmap(icon_path)
-except Exception:
-    pass
+apply_window_icon(root)
 
 # ---- ส่วนบน: กรอก Host / Port ----
 frame_top = tk.Frame(root)
@@ -762,6 +1151,9 @@ btn_check_sel.grid(row=0, column=0, padx=5)
 
 btn_check_all = tk.Button(frame_bottom, text="Check All", width=15, command=check_all)
 btn_check_all.grid(row=0, column=1, padx=5)
+
+btn_trace = tk.Button(frame_bottom, text="Trace Route", width=15, command=open_trace_route)
+btn_trace.grid(row=0, column=2, padx=5)
 
 lbl_interval = tk.Label(frame_bottom, text="Interval (sec):")
 lbl_interval.grid(row=1, column=0, pady=(10, 0))

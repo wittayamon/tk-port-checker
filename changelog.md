@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased — recommended v1.3.0
+
+- Added a Trace Route action for a selected Host/IP using Windows `tracert -d`.
+- Added streaming raw trace output in a responsive, themed Toplevel window.
+- Added configurable Max Hops and per-reply Timeout values with validation.
+- Added Run Again, Stop, Copy, and safe trace-window/process cleanup behavior.
+- Applied the application icon consistently to the main and Trace Route windows.
+- Kept Trace Route independent from Ping and TCP ONLINE/OFFLINE results.
+- Added focused tests for tracert command construction and input validation.
+
 ## v1.2.0 - 2026-09-02
 
 - Added inclusive IPv4 Range Scan controls for Start IP, End IP, and TCP Port.
