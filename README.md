@@ -9,7 +9,7 @@
 
 # Multi Host Port Checker
 
-A Windows-friendly Tkinter desktop application for monitoring ICMP Ping latency and TCP port availability across individual targets or IPv4 ranges.
+A Windows-friendly Tkinter desktop application for monitoring named devices, ICMP Ping latency, and TCP port availability across individual targets or IPv4 ranges.
 
 The Ping and TCP results are independent: a host can respond to Ping while its configured TCP port is offline, or block Ping while its TCP service remains online.
 
@@ -18,8 +18,11 @@ The Ping and TCP results are independent: a host can respond to Ping while its c
 ## Features
 
 - Add and remove Host/IP + TCP Port targets
+- Assign an optional Device Name and edit existing targets in place
 - One-attempt Ping monitoring with latency, `Timeout`, or `Online` fallback
 - Socket-based TCP port checks with color-coded ONLINE/OFFLINE status
+- State Change Alerts for TCP DOWN and RECOVERED transitions with downtime display
+- Persisted State Change Alerts toggle, enabled by default
 - Check Selected and Check All
 - Non-overlapping Auto Refresh
 - Responsive background checks using a bounded worker pool
@@ -31,6 +34,22 @@ The Ping and TCP results are independent: a host can respond to Ping while its c
 - Auto-load saved hosts and theme configuration
 - Dark and Light themes
 - PyInstaller-compatible icon and resource handling
+
+## Device Names and target data
+
+Device Name is optional and provides a friendly label such as `PLC-MC1`, `NAS`, or `Printer-Line1`. Select one row and choose **Edit Selected** to populate the Device Name, Host/IP, and Port fields; choose **Apply** to update the row without deleting and re-adding it.
+
+Newly saved records support the following format:
+
+```json
+{
+  "name": "PLC-MC1",
+  "host": "192.168.0.100",
+  "port": 102
+}
+```
+
+Existing records without `name` continue to load with an empty Device Name and require no manual migration.
 
 ## IPv4 Range Scan
 
@@ -45,6 +64,8 @@ Port:     443
 The progress label reports values such as `Scanning 37 / 254`. **Cancel Scan** stops submitting new addresses immediately and cancels queued work; network calls already running are allowed to finish safely.
 
 By default, a scan adds or updates only targets where Ping responds or the TCP port is open. Enable **Show all scanned IPs** to include Ping-timeout/TCP-offline results as well. Newly discovered scan rows are runtime results and are not automatically written to the application config on exit. Use **Save List** if you intentionally want to export the visible rows.
+
+Newly discovered scan rows start with an empty Device Name and do not generate State Change Alerts. Manually adding or editing a discovered target promotes it to a persistent monitored target, after which its first regular TCP check establishes the alert baseline.
 
 Ranges must contain valid IPv4 addresses, the end must not be lower than the start, and a scan is limited to 1,024 addresses. Stop Auto Refresh and allow any active check to finish before starting a range scan.
 
@@ -69,11 +90,26 @@ Ping, TCP availability, and Trace Route are independent diagnostic signals. A ti
 ## Status columns
 
 ```text
-Host / IP | Port | Ping (ms) | Status
+Device Name | Host / IP | Port | Ping (ms) | Status
 ```
 
 - Ping values include `7 ms`, `<1 ms`, `Timeout`, or `Online` if Ping succeeds but latency cannot be parsed.
 - ONLINE/OFFLINE always represents TCP port availability, not Ping availability.
+
+## State Change Alerts
+
+Enable or disable alerts with **State Change Alerts**. The setting is enabled by default and is stored in `mpc_config.json`; older configs without the setting also default to enabled.
+
+Alerts track only TCP status during **Check Selected**, **Check All**, and **Auto Refresh**:
+
+- The first `UNKNOWN -> ONLINE` or `UNKNOWN -> OFFLINE` result establishes a baseline and does not alert.
+- `ONLINE -> OFFLINE` produces one **DEVICE DOWN** warning.
+- Repeated OFFLINE results do not produce duplicate alerts.
+- `OFFLINE -> ONLINE` produces one **DEVICE RECOVERED** message with the measured downtime.
+- If Device Name is empty, Host/IP is used as the primary identifier.
+- More than three changes completed in one check cycle are consolidated into one summary dialog.
+
+Ping remains diagnostic information. A Ping `Timeout` does not cause a DOWN alert while the TCP Port remains ONLINE. Runtime IP Range Scan discoveries do not participate in alerts unless they are promoted to persistent monitored targets.
 
 ## Requirements
 
@@ -91,16 +127,17 @@ python multi_port_checker.py
 
 ## Saved data
 
-Host lists remain compatible with the existing format:
+Host lists support Device Name:
 
 ```json
 {
+  "name": "PLC-MC1",
   "host": "google.com",
   "port": 443
 }
 ```
 
-Ping latency and TCP status are runtime values and are not required in saved files.
+Older records containing only `host` and `port` remain compatible and load with an empty Device Name. Ping latency, TCP status, outage timestamps, and Trace Route results are runtime values and are not stored in host-list records.
 
 ## Build a Windows EXE
 
@@ -117,9 +154,11 @@ The executable is created at `dist\MultiPortChecker.exe`. Python is not required
 ```text
 multi_port_checker.py       Tkinter UI and background task coordination
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
+monitoring_state.py         Host-record compatibility and TCP state tracking
 test_ping_helpers.py        Ping/TCP helper tests
 test_range_scan_helpers.py  IPv4 range, duplicate-key, and cancellation tests
 test_trace_route_helpers.py Trace command and input-validation tests
+test_monitoring_state.py    Device-record, transition, and duration tests
 MultiPortChecker.spec       PyInstaller build configuration
 icon_network_transparent.ico
 README.md
@@ -131,7 +170,7 @@ changelog.md
 
 ```powershell
 python -m unittest -v
-python -m py_compile multi_port_checker.py network_checks.py test_ping_helpers.py test_range_scan_helpers.py test_trace_route_helpers.py
+python -m py_compile multi_port_checker.py network_checks.py monitoring_state.py test_ping_helpers.py test_range_scan_helpers.py test_trace_route_helpers.py test_monitoring_state.py
 ```
 
 ## Roadmap

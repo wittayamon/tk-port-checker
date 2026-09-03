@@ -18,6 +18,14 @@ from network_checks import (
     check_target,
     normalize_target_key,
 )
+from monitoring_state import (
+    EVENT_DOWN,
+    TcpStateTracker,
+    alert_enabled_from_config,
+    format_duration,
+    make_host_record,
+    normalize_host_record,
+)
 
 # ===================== Global flags =====================
 
@@ -32,14 +40,21 @@ scan_pending = {}
 scan_completed = 0
 scan_show_all = False
 transient_scan_items = set()
+editing_item_id = None
 
 network_executor = ThreadPoolExecutor(max_workers=CHECK_WORKERS, thread_name_prefix="network-check")
 trace_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="trace-route")
 trace_windows = set()
+tcp_state_tracker = TcpStateTracker()
 current_theme = "light"   # "light" หรือ "dark"
 
 # ไฟล์ config สำหรับจำ theme + host list
 CONFIG_NAME = "mpc_config.json"
+COL_NAME = 0
+COL_HOST = 1
+COL_PORT = 2
+COL_PING = 3
+COL_STATUS = 4
 
 
 # ===================== Helper =====================
@@ -75,6 +90,8 @@ def apply_window_icon(window) -> None:
 # ===================== Logic: add / remove / update =====================
 
 def add_target():
+    global editing_item_id
+    name = entry_name.get().strip()
     host = entry_host.get().strip()
     port_text = entry_port.get().strip()
 
@@ -88,15 +105,90 @@ def add_target():
 
     port = int(port_text)
 
+    if editing_item_id is not None and tree.exists(editing_item_id):
+        duplicate_item = find_existing_target(host, port, exclude_item=editing_item_id)
+        if duplicate_item is not None:
+            messagebox.showwarning(
+                "Edit Target", "Another target already uses this Host/IP and Port."
+            )
+            return
+        old_values = tree.item(editing_item_id, "values")
+        try:
+            old_key = normalize_target_key(
+                str(old_values[COL_HOST]), int(old_values[COL_PORT])
+            )
+        except (TypeError, ValueError):
+            old_key = None
+        ping_text = old_values[COL_PING]
+        status_text = old_values[COL_STATUS]
+        tree.item(
+            editing_item_id,
+            values=(name, host, port, ping_text, status_text),
+        )
+        if old_key != normalize_target_key(host, port):
+            tcp_state_tracker.forget(editing_item_id)
+        transient_scan_items.discard(editing_item_id)
+        tree.selection_set(editing_item_id)
+        finish_editing(clear_entries=False)
+        return
+
     existing_item = find_existing_target(host, port)
     if existing_item is not None:
+        values = tree.item(existing_item, "values")
+        existing_name = str(values[COL_NAME])
+        if name or existing_item in transient_scan_items:
+            existing_name = name
+        tree.item(
+            existing_item,
+            values=(
+                existing_name,
+                values[COL_HOST],
+                values[COL_PORT],
+                values[COL_PING],
+                values[COL_STATUS],
+            ),
+        )
         transient_scan_items.discard(existing_item)
         tree.selection_set(existing_item)
         tree.focus(existing_item)
         tree.see(existing_item)
         return
 
-    tree.insert("", "end", values=(host, port, "N/A", "Not checked"), tags=("unknown",))
+    tree.insert(
+        "",
+        "end",
+        values=(name, host, port, "N/A", "Not checked"),
+        tags=("unknown",),
+    )
+
+
+def finish_editing(clear_entries: bool = False):
+    global editing_item_id
+    editing_item_id = None
+    btn_add.config(text="Add")
+    if clear_entries:
+        entry_name.delete(0, "end")
+
+
+def edit_selected():
+    global editing_item_id
+    selected = tree.selection()
+    if len(selected) != 1:
+        messagebox.showinfo("Edit Selected", "Please select exactly one target to edit.")
+        return
+    values = tree.item(selected[0], "values")
+    if len(values) < 5:
+        return
+    editing_item_id = selected[0]
+    for entry_widget, value in (
+        (entry_name, values[COL_NAME]),
+        (entry_host, values[COL_HOST]),
+        (entry_port, values[COL_PORT]),
+    ):
+        entry_widget.delete(0, "end")
+        entry_widget.insert(0, value)
+    btn_add.config(text="Apply")
+    entry_name.focus_set()
 
 
 def remove_selected():
@@ -107,18 +199,25 @@ def remove_selected():
 
     for item in selected:
         transient_scan_items.discard(item)
+        tcp_state_tracker.forget(item)
         tree.delete(item)
+    if editing_item_id in selected:
+        finish_editing(clear_entries=False)
 
 
-def find_existing_target(host: str, port: int):
+def find_existing_target(host: str, port: int, exclude_item=None):
     """Find an existing row by normalized Host/IP + Port."""
     wanted_key = normalize_target_key(host, port)
     for item_id in tree.get_children():
+        if item_id == exclude_item:
+            continue
         values = tree.item(item_id, "values")
-        if len(values) < 2:
+        if len(values) < 3:
             continue
         try:
-            existing_key = normalize_target_key(str(values[0]), int(values[1]))
+            existing_key = normalize_target_key(
+                str(values[COL_HOST]), int(values[COL_PORT])
+            )
         except (TypeError, ValueError):
             continue
         if existing_key == wanted_key:
@@ -126,17 +225,88 @@ def find_existing_target(host: str, port: int):
     return None
 
 
-def update_row_status(item_id: str, host: str, port: int, ping_text: str, ok: bool):
+def update_row_status(
+    item_id: str,
+    host: str,
+    port: int,
+    ping_text: str,
+    ok: bool,
+    *,
+    track_state: bool = True,
+):
     """Apply a completed result on Tk's main thread."""
     if not tree.exists(item_id):
-        return
+        return None
     values = tree.item(item_id, "values")
-    if len(values) < 2 or values[0] != host or str(values[1]) != str(port):
-        return
+    if (
+        len(values) < 5
+        or values[COL_HOST] != host
+        or str(values[COL_PORT]) != str(port)
+    ):
+        return None
 
     status_text = "✅ ONLINE" if ok else "❌ OFFLINE"
     tag = "online" if ok else "offline"
-    tree.item(item_id, values=(host, port, ping_text, status_text), tags=(tag,))
+    tree.item(
+        item_id,
+        values=(values[COL_NAME], host, port, ping_text, status_text),
+        tags=(tag,),
+    )
+    if not track_state:
+        return None
+    event = tcp_state_tracker.observe(
+        item_id, ok, persistent=item_id not in transient_scan_items
+    )
+    if event is None:
+        return None
+    return {
+        "event": event,
+        "name": str(values[COL_NAME]).strip(),
+        "host": host,
+        "port": port,
+        "ping": ping_text,
+    }
+
+
+def show_state_change_alerts(alerts):
+    """Display state changes from Tk's main thread with simple flood protection."""
+    if not alerts or not state_change_alerts_var.get():
+        return
+    if len(alerts) > 3:
+        lines = []
+        for alert in alerts:
+            identifier = alert["name"] or alert["host"]
+            lines.append(
+                f'{alert["event"].kind}: {identifier} '
+                f'({alert["host"]}:{alert["port"]})'
+            )
+        messagebox.showwarning(
+            "STATE CHANGES",
+            f"{len(alerts)} TCP services changed state:\n\n" + "\n".join(lines),
+        )
+        return
+
+    for alert in alerts:
+        event = alert["event"]
+        identifier = alert["name"] or alert["host"]
+        timestamp = event.occurred_at.strftime("%Y-%m-%d %H:%M:%S")
+        lines = [
+            f"Device: {identifier}",
+            f'Host: {alert["host"]}',
+            f'Port: {alert["port"]}',
+            f'Ping: {alert["ping"]}',
+        ]
+        if event.kind == EVENT_DOWN:
+            lines.append(f"Time: {timestamp}")
+            messagebox.showwarning("DEVICE DOWN", "\n".join(lines))
+        else:
+            downtime = (
+                format_duration(event.downtime_seconds)
+                if event.downtime_seconds is not None
+                else "Unknown"
+            )
+            lines.extend((f"Downtime: {downtime}", f"Time: {timestamp}"))
+            messagebox.showinfo("DEVICE RECOVERED", "\n".join(lines))
 
 
 def finish_check_cycle():
@@ -155,12 +325,16 @@ def poll_check_cycle():
         root.after(50, poll_check_cycle)
         return
 
+    alerts = []
     for item_id, host, port, future in active_checks:
         try:
             ping_text, port_online = future.result()
         except Exception:
             ping_text, port_online = "Timeout", False
-        update_row_status(item_id, host, port, ping_text, port_online)
+        alert = update_row_status(item_id, host, port, ping_text, port_online)
+        if alert is not None:
+            alerts.append(alert)
+    show_state_change_alerts(alerts)
     finish_check_cycle()
 
 
@@ -173,9 +347,9 @@ def start_check_cycle(item_ids) -> bool:
     targets = []
     for item_id in item_ids:
         values = tree.item(item_id, "values")
-        if len(values) < 2:
+        if len(values) < 3:
             continue
-        host, port_text = str(values[0]), values[1]
+        host, port_text = str(values[COL_HOST]), values[COL_PORT]
         try:
             port = int(port_text)
         except (TypeError, ValueError):
@@ -557,10 +731,10 @@ def open_trace_route():
         messagebox.showinfo("Trace Route", "Please select only one Host/IP.")
         return
     values = tree.item(selected[0], "values")
-    if not values or not str(values[0]).strip():
+    if len(values) < 3 or not str(values[COL_HOST]).strip():
         messagebox.showinfo("Trace Route", "Please select a valid Host/IP.")
         return
-    TraceRouteWindow(root, str(values[0]).strip())
+    TraceRouteWindow(root, str(values[COL_HOST]).strip())
 
 
 # ===================== IPv4 Range Scan =====================
@@ -572,6 +746,7 @@ def set_scan_controls(running: bool):
     btn_check_all.config(state="disabled" if running else "normal")
     btn_start_auto.config(state="disabled" if running else "normal")
     btn_add.config(state="disabled" if running else "normal")
+    btn_edit.config(state="disabled" if running else "normal")
     btn_remove.config(state="disabled" if running else "normal")
     btn_load.config(state="disabled" if running else "normal")
 
@@ -590,11 +765,13 @@ def apply_scan_result(host: str, port: int, ping_text: str, port_online: bool):
         item_id = tree.insert(
             "",
             "end",
-            values=(host, port, ping_text, "Not checked"),
+            values=("", host, port, ping_text, "Not checked"),
             tags=("unknown",),
         )
         transient_scan_items.add(item_id)
-    update_row_status(item_id, host, port, ping_text, port_online)
+    update_row_status(
+        item_id, host, port, ping_text, port_online, track_state=False
+    )
 
 
 def submit_scan_work():
@@ -706,12 +883,12 @@ def save_host_list():
 
     data = []
     for item in items:
-        host, port, _ping, _status = tree.item(item, "values")
+        name, host, port, _ping, _status = tree.item(item, "values")
         try:
             port_int = int(port)
-        except ValueError:
+        except (TypeError, ValueError):
             port_int = port
-        data.append({"host": host, "port": port_int})
+        data.append(make_host_record(name, host, port_int))
 
     path = filedialog.asksaveasfilename(
         defaultextension=".json",
@@ -744,18 +921,31 @@ def load_host_list():
         messagebox.showerror("Load List", f"ไม่สามารถอ่านไฟล์ได้:\n{e}")
         return
 
+    if not isinstance(data, list):
+        messagebox.showerror("Load List", "Host list must contain a JSON array.")
+        return
+
     # ล้างของเดิม
     transient_scan_items.clear()
+    tcp_state_tracker.clear()
+    finish_editing(clear_entries=False)
     for item in tree.get_children():
         tree.delete(item)
 
     # เพิ่มใหม่
     for entry in data:
-        host = str(entry.get("host", "")).strip()
-        port = entry.get("port", "")
+        if not isinstance(entry, dict):
+            continue
+        record = normalize_host_record(entry)
+        name, host, port = record["name"], record["host"], record["port"]
         if not host:
             continue
-        tree.insert("", "end", values=(host, port, "N/A", "Not checked"), tags=("unknown",))
+        tree.insert(
+            "",
+            "end",
+            values=(name, host, port, "N/A", "Not checked"),
+            tags=("unknown",),
+        )
 
 
 # ===================== Config: auto-save theme + hosts =====================
@@ -767,15 +957,16 @@ def save_config():
     for item in items:
         if item in transient_scan_items:
             continue
-        host, port, _ping, _status = tree.item(item, "values")
+        name, host, port, _ping, _status = tree.item(item, "values")
         try:
             port_int = int(port)
-        except ValueError:
+        except (TypeError, ValueError):
             port_int = port
-        hosts.append({"host": host, "port": port_int})
+        hosts.append(make_host_record(name, host, port_int))
 
     config = {
         "theme": current_theme,
+        "state_change_alerts": bool(state_change_alerts_var.get()),
         "hosts": hosts,
     }
 
@@ -801,19 +992,34 @@ def load_config():
         print("Load config error:", e)
         return
 
+    if not isinstance(config, dict):
+        print("Load config error: config root must be a JSON object")
+        return
+
     # theme
     theme = config.get("theme")
     if theme in ("light", "dark"):
         current_theme = theme
 
+    state_change_alerts_var.set(alert_enabled_from_config(config))
+
     # hosts
     hosts = config.get("hosts", [])
+    if not isinstance(hosts, list):
+        return
     for entry in hosts:
-        host = str(entry.get("host", "")).strip()
-        port = entry.get("port", "")
+        if not isinstance(entry, dict):
+            continue
+        record = normalize_host_record(entry)
+        name, host, port = record["name"], record["host"], record["port"]
         if not host:
             continue
-        tree.insert("", "end", values=(host, port, "N/A", "Not checked"), tags=("unknown",))
+        tree.insert(
+            "",
+            "end",
+            values=(name, host, port, "N/A", "Not checked"),
+            tags=("unknown",),
+        )
 
 
 def on_close():
@@ -962,6 +1168,7 @@ def apply_theme(theme: str):
 
     # label
     for lbl in (
+        lbl_name,
         lbl_host,
         lbl_port,
         lbl_interval,
@@ -974,6 +1181,7 @@ def apply_theme(theme: str):
 
     # entry
     for ent in (
+        entry_name,
         entry_host,
         entry_port,
         entry_interval,
@@ -983,17 +1191,19 @@ def apply_theme(theme: str):
     ):
         ent.configure(bg=entry_bg, fg=entry_fg, insertbackground=entry_fg)
 
-    chk_show_all.configure(
-        bg=bg,
-        fg=fg,
-        selectcolor=entry_bg,
-        activebackground=bg,
-        activeforeground=fg,
-    )
+    for checkbox in (chk_show_all, chk_state_alerts):
+        checkbox.configure(
+            bg=bg,
+            fg=fg,
+            selectcolor=entry_bg,
+            activebackground=bg,
+            activeforeground=fg,
+        )
 
     # button
     for btn in (
         btn_add,
+        btn_edit,
         btn_remove,
         btn_check_sel,
         btn_check_all,
@@ -1038,7 +1248,7 @@ def apply_theme(theme: str):
 
 root = tk.Tk()
 root.title("Multi Host Port Checker (with Ping)")
-root.geometry("900x620")
+root.geometry("1050x650")
 root.resizable(False, False)
 apply_window_icon(root)
 
@@ -1046,42 +1256,53 @@ apply_window_icon(root)
 frame_top = tk.Frame(root)
 frame_top.pack(pady=10, padx=10, fill="x")
 
-lbl_host = tk.Label(frame_top, text="Host / IP:")
-lbl_host.grid(row=0, column=0, padx=(0, 5))
+lbl_name = tk.Label(frame_top, text="Device Name:")
+lbl_name.grid(row=0, column=0, padx=(0, 5))
 
-entry_host = tk.Entry(frame_top, width=30)
-entry_host.grid(row=0, column=1, padx=(0, 10))
+entry_name = tk.Entry(frame_top, width=20)
+entry_name.grid(row=0, column=1, padx=(0, 10))
+
+lbl_host = tk.Label(frame_top, text="Host / IP:")
+lbl_host.grid(row=0, column=2, padx=(0, 5))
+
+entry_host = tk.Entry(frame_top, width=25)
+entry_host.grid(row=0, column=3, padx=(0, 10))
 entry_host.insert(0, "google.com")
 
 lbl_port = tk.Label(frame_top, text="Port:")
-lbl_port.grid(row=0, column=2, padx=(0, 5))
+lbl_port.grid(row=0, column=4, padx=(0, 5))
 
 entry_port = tk.Entry(frame_top, width=8)
-entry_port.grid(row=0, column=3, padx=(0, 10))
+entry_port.grid(row=0, column=5, padx=(0, 10))
 entry_port.insert(0, "443")
 
 btn_add = tk.Button(frame_top, text="Add", width=10, command=add_target)
-btn_add.grid(row=0, column=4, padx=(0, 5))
+btn_add.grid(row=0, column=6, padx=(0, 5))
+
+btn_edit = tk.Button(frame_top, text="Edit Selected", width=13, command=edit_selected)
+btn_edit.grid(row=0, column=7, padx=(0, 5))
 
 btn_remove = tk.Button(frame_top, text="Remove Selected", width=15, command=remove_selected)
-btn_remove.grid(row=0, column=5)
+btn_remove.grid(row=0, column=8)
 
 # ---- ตาราง ----
 frame_table = tk.Frame(root)
 frame_table.pack(pady=5, padx=10, fill="both", expand=True)
 
-columns = ("host", "port", "ping", "status")
+columns = ("name", "host", "port", "ping", "status")
 tree = ttk.Treeview(frame_table, columns=columns, show="headings", height=14)
 
+tree.heading("name", text="Device Name")
 tree.heading("host", text="Host / IP")
 tree.heading("port", text="Port")
 tree.heading("ping", text="Ping (ms)")
 tree.heading("status", text="Status")
 
-tree.column("host", width=300)
+tree.column("name", width=190)
+tree.column("host", width=270)
 tree.column("port", width=70, anchor="center")
 tree.column("ping", width=100, anchor="center")
-tree.column("status", width=220)
+tree.column("status", width=190)
 
 scrollbar_y = ttk.Scrollbar(frame_table, orient="vertical", command=tree.yview)
 tree.configure(yscrollcommand=scrollbar_y.set)
@@ -1176,6 +1397,14 @@ btn_load.grid(row=2, column=1, padx=5, pady=(10, 0))
 
 btn_theme = tk.Button(frame_bottom, text="Dark Mode", width=15, command=toggle_theme)
 btn_theme.grid(row=2, column=2, padx=5, pady=(10, 0))
+
+state_change_alerts_var = tk.BooleanVar(value=True)
+chk_state_alerts = tk.Checkbutton(
+    frame_bottom,
+    text="State Change Alerts",
+    variable=state_change_alerts_var,
+)
+chk_state_alerts.grid(row=2, column=3, padx=5, pady=(10, 0), sticky="w")
 
 # โหลด config (theme + hosts) ก่อน apply_theme
 load_config()

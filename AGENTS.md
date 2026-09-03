@@ -7,6 +7,7 @@ This repository contains **Multi Host Port Checker**, a Windows desktop network 
 Main capabilities currently include:
 
 - Add and remove multiple Host/IP + TCP Port targets
+- Optional Device Name and in-place target editing
 - Check TCP port availability
 - Ping monitoring with latency display
 - Ping and TCP status are intentionally independent
@@ -16,6 +17,7 @@ Main capabilities currently include:
 - Background network checks so the Tkinter UI remains responsive
 - IPv4 Range Scan with progress and cancellation
 - Trace Route with streaming output and process controls
+- TCP State Change Alerts with downtime tracking
 - Save / Load host lists
 - Auto-load saved hosts
 - Dark / Light theme
@@ -24,6 +26,8 @@ Main capabilities currently include:
 - Custom application icon
 
 Current release version: **v1.3.0**
+
+Current recommended version for the Device Name and State Change Alert work: **v1.4.0**
 
 ---
 
