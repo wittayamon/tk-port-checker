@@ -14,6 +14,8 @@ Main capabilities currently include:
 - Check All
 - Auto Refresh
 - Background network checks so the Tkinter UI remains responsive
+- IPv4 Range Scan with progress and cancellation
+- Trace Route with streaming output and process controls
 - Save / Load host lists
 - Auto-load saved hosts
 - Dark / Light theme
@@ -21,7 +23,7 @@ Main capabilities currently include:
 - PyInstaller EXE build support
 - Custom application icon
 
-Current recommended version after Ping monitoring was added: **v1.1.0**
+Current release version: **v1.3.0**
 
 ---
 
@@ -40,13 +42,23 @@ Before modifying the project:
 
 ---
 
-## README.md Maintenance — REQUIRED
+## README.md / README_TH.md Maintenance — REQUIRED
 
-Whenever a change affects user-visible behavior, installation, configuration, usage, build steps, features, screenshots, release information, or project structure, **README.md must be reviewed and updated in the same task**.
+Whenever a change affects user-visible behavior, installation, configuration, usage, build steps, features, screenshots, release information, or project structure, **README.md and README_TH.md must both be reviewed and updated in the same task**.
 
-Do not leave README.md outdated after implementing a feature.
+Do not leave either README outdated after implementing a feature.
 
-Examples that require a README.md update:
+The two README files must remain functionally synchronized. `README.md` is the canonical source for structure and technical facts unless the project explicitly changes that policy.
+
+Codex must:
+
+- Update both README files when user-visible features change
+- Keep commands, download links, release links, screenshots, GIF paths, version information, limits, and feature names consistent
+- Never update only one language and leave the other stale
+- Never invent Thai-only or English-only features
+- Preserve technical accuracy over literal translation
+
+Examples that require both `README.md` and `README_TH.md` updates:
 
 - New feature added
 - Existing feature removed or renamed
@@ -67,7 +79,7 @@ Examples that require a README.md update:
 - EXE filename or download URL changed
 - Screenshot or demo GIF changed
 
-README updates should be concise and reflect the actual implementation.
+Updates to both README files should be concise and reflect the actual implementation.
 
 ### README sections to review when relevant
 
@@ -271,7 +283,7 @@ If IP Range Scan is implemented or added:
 - Consider progress/status feedback for long scans
 - Reuse existing Ping/TCP helper functions where practical
 
-If no IP Range Scan currently exists, do not claim that it does in README.md.
+If no IP Range Scan currently exists, do not claim that it does in README.md or README_TH.md.
 
 ---
 
@@ -310,7 +322,7 @@ Target behavior:
 
 Do not introduce dependencies that break PyInstaller packaging without updating the build instructions.
 
-If the build command or `.spec` file changes, update README.md.
+If the build command or `.spec` file changes, update README.md and README_TH.md.
 
 ---
 
@@ -324,7 +336,7 @@ After code changes:
 4. Verify the Tkinter application starts without exceptions.
 5. Manually test the changed workflow.
 6. If PyInstaller-related code changed, verify an EXE build when practical.
-7. Review README.md and CHANGELOG.md for required updates.
+7. Review README.md, README_TH.md, and CHANGELOG.md for required updates.
 
 For Ping-related changes, test at minimum:
 
@@ -393,7 +405,7 @@ For each task:
 4. Preserve unrelated existing behavior.
 5. Add/update tests where practical.
 6. Run verification.
-7. Review and update `README.md` if the implementation affects documentation.
+7. Review and update `README.md` and `README_TH.md` if the implementation affects documentation.
 8. Update `CHANGELOG.md` for meaningful user-visible changes when appropriate.
 9. Do not commit unless explicitly requested.
 10. Report:
@@ -401,7 +413,7 @@ For each task:
    - Main functions/classes changed
    - Behavior added/fixed
    - Tests/checks run
-   - README/CHANGELOG changes
+   - README.md / README_TH.md / CHANGELOG.md changes
    - Compatibility considerations
    - Recommended version bump
 

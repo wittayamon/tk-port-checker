@@ -1,3 +1,12 @@
+<p align="right">
+  <a href="README.md">
+    <img src="https://img.shields.io/badge/Language-English-blue?style=for-the-badge">
+  </a>
+  <a href="README_TH.md">
+    <img src="https://img.shields.io/badge/ภาษา-ไทย-green?style=for-the-badge">
+  </a>
+</p>
+
 # Multi Host Port Checker
 
 A Windows-friendly Tkinter desktop application for monitoring ICMP Ping latency and TCP port availability across individual targets or IPv4 ranges.
@@ -114,6 +123,7 @@ test_trace_route_helpers.py Trace command and input-validation tests
 MultiPortChecker.spec       PyInstaller build configuration
 icon_network_transparent.ico
 README.md
+README_TH.md
 changelog.md
 ```
 
