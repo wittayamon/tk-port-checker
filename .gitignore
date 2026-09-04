@@ -11,7 +11,7 @@ venv/
 build/
 dist/
 *.spec
-
+list.json
 # Local application data
 mpc_config.json
 p.json
