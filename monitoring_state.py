@@ -52,6 +52,8 @@ def format_duration(seconds: float) -> str:
 class StateChangeEvent:
     kind: str
     occurred_at: datetime
+    previous_status: str
+    new_status: str
     downtime_seconds: Optional[float] = None
 
 
@@ -78,7 +80,7 @@ class TcpStateTracker:
         if not persistent:
             return None
 
-        observed_at = now or datetime.now()
+        observed_at = now or datetime.now().astimezone()
         new_status = TCP_ONLINE if port_online else TCP_OFFLINE
         state = self._states.setdefault(key, _TargetState())
         previous_status = state.status
@@ -94,7 +96,9 @@ class TcpStateTracker:
         state.status = new_status
         if new_status == TCP_OFFLINE:
             state.outage_started = observed_at
-            return StateChangeEvent(EVENT_DOWN, observed_at)
+            return StateChangeEvent(
+                EVENT_DOWN, observed_at, previous_status, new_status
+            )
 
         downtime_seconds = None
         if state.outage_started is not None:
@@ -102,11 +106,16 @@ class TcpStateTracker:
                 0.0, (observed_at - state.outage_started).total_seconds()
             )
         state.outage_started = None
-        return StateChangeEvent(EVENT_RECOVERED, observed_at, downtime_seconds)
+        return StateChangeEvent(
+            EVENT_RECOVERED,
+            observed_at,
+            previous_status,
+            new_status,
+            downtime_seconds,
+        )
 
     def forget(self, key: Hashable) -> None:
         self._states.pop(key, None)
 
     def clear(self) -> None:
         self._states.clear()
-

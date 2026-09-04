@@ -15,22 +15,22 @@ from monitoring_state import (
 class HostRecordCompatibilityTests(unittest.TestCase):
     def test_old_record_without_name_defaults_to_empty_string(self):
         self.assertEqual(
-            normalize_host_record({"host": "192.168.0.100", "port": 102}),
-            {"name": "", "host": "192.168.0.100", "port": 102},
+            normalize_host_record({"host": "192.168.1.100", "port": 102}),
+            {"name": "", "host": "192.168.1.100", "port": 102},
         )
 
     def test_new_record_preserves_device_name(self):
         self.assertEqual(
             normalize_host_record(
-                {"name": "PLC-MC1", "host": "192.168.0.100", "port": 102}
+                {"name": "Demo-PLC", "host": "192.168.1.100", "port": 102}
             ),
-            {"name": "PLC-MC1", "host": "192.168.0.100", "port": 102},
+            {"name": "Demo-PLC", "host": "192.168.1.100", "port": 102},
         )
 
     def test_saved_record_contains_only_persistent_target_fields(self):
         self.assertEqual(
-            make_host_record("PLC-MC1", "192.168.0.100", 102),
-            {"name": "PLC-MC1", "host": "192.168.0.100", "port": 102},
+            make_host_record("Demo-PLC", "192.168.1.100", 102),
+            {"name": "Demo-PLC", "host": "192.168.1.100", "port": 102},
         )
 
     def test_old_config_defaults_alerts_to_enabled(self):

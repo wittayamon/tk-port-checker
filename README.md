@@ -23,6 +23,9 @@ The Ping and TCP results are independent: a host can respond to Ping while its c
 - Socket-based TCP port checks with color-coded ONLINE/OFFLINE status
 - State Change Alerts for TCP DOWN and RECOVERED transitions with downtime display
 - Persisted State Change Alerts toggle, enabled by default
+- Persistent Event History with newest-first DOWN and RECOVERED records
+- Device/Host and Event Type history filters
+- Filter-aware CSV Export and confirmed Clear History controls
 - Check Selected and Check All
 - Non-overlapping Auto Refresh
 - Responsive background checks using a bounded worker pool
@@ -37,14 +40,14 @@ The Ping and TCP results are independent: a host can respond to Ping while its c
 
 ## Device Names and target data
 
-Device Name is optional and provides a friendly label such as `PLC-MC1`, `NAS`, or `Printer-Line1`. Select one row and choose **Edit Selected** to populate the Device Name, Host/IP, and Port fields; choose **Apply** to update the row without deleting and re-adding it.
+Device Name is optional and provides a friendly label such as `Demo-PLC`, `NAS-01`, or `Printer-01`. Select one row and choose **Edit Selected** to populate the Device Name, Host/IP, and Port fields; choose **Apply** to update the row without deleting and re-adding it.
 
 Newly saved records support the following format:
 
 ```json
 {
-  "name": "PLC-MC1",
-  "host": "192.168.0.100",
+  "name": "Demo-PLC",
+  "host": "192.168.1.100",
   "port": 102
 }
 ```
@@ -71,7 +74,7 @@ Ranges must contain valid IPv4 addresses, the end must not be lower than the sta
 
 ## Trace Route
 
-Select exactly one Host/IP row and choose **Trace Route**. A separate, resizable window runs the trace and displays raw `tracert` output progressively. Both IPv4 addresses and DNS hostnames such as `google.com` are supported.
+Select exactly one Host/IP row and choose **Trace Route**. A separate, resizable window runs the trace and displays raw `tracert` output progressively. Both IPv4 addresses and DNS hostnames such as `example.com` are supported.
 
 The default command is:
 
@@ -111,6 +114,23 @@ Alerts track only TCP status during **Check Selected**, **Check All**, and **Aut
 
 Ping remains diagnostic information. A Ping `Timeout` does not cause a DOWN alert while the TCP Port remains ONLINE. Runtime IP Range Scan discoveries do not participate in alerts unless they are promoted to persistent monitored targets.
 
+## Event History
+
+Choose **Event History** to open a separate, themed window containing persistent TCP state changes, newest first. Baseline results (`UNKNOWN -> ONLINE` and `UNKNOWN -> OFFLINE`) are not logged. Repeated states, Ping-only changes, Trace Route results, and transient IP Range Scan discoveries also do not create history records.
+
+The history table displays:
+
+```text
+Date / Time | Device | Host / IP | Port | Event | Ping | Downtime
+```
+
+- Search by Device Name or Host/IP.
+- Filter Event Type by **All**, **DOWN**, or **RECOVERED**.
+- **Export CSV** exports the currently filtered rows with timestamp, transition status, raw downtime seconds, and a formatted downtime value. Files use UTF-8 with BOM for Thai and other Unicode names in Microsoft Excel.
+- **Clear History** requires confirmation and deletes only history records; monitored targets, current monitoring state, and settings are unchanged.
+
+Event History uses the standard-library SQLite database `events.db` in the same writable application directory as the local config. The database and table are created automatically when history is first used and are not bundled into the EXE. The newest 10,000 events are retained; older rows are pruned after inserts.
+
 ## Requirements
 
 - Python 3.9 or newer when running from source
@@ -131,8 +151,8 @@ Host lists support Device Name:
 
 ```json
 {
-  "name": "PLC-MC1",
-  "host": "google.com",
+  "name": "Demo-PLC",
+  "host": "example.com",
   "port": 443
 }
 ```
@@ -155,10 +175,12 @@ The executable is created at `dist\MultiPortChecker.exe`. Python is not required
 multi_port_checker.py       Tkinter UI and background task coordination
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
+event_history.py            SQLite Event History and CSV export helpers
 test_ping_helpers.py        Ping/TCP helper tests
 test_range_scan_helpers.py  IPv4 range, duplicate-key, and cancellation tests
 test_trace_route_helpers.py Trace command and input-validation tests
 test_monitoring_state.py    Device-record, transition, and duration tests
+test_event_history.py       Event storage, filtering, retention, and CSV tests
 MultiPortChecker.spec       PyInstaller build configuration
 icon_network_transparent.ico
 README.md
@@ -170,11 +192,10 @@ changelog.md
 
 ```powershell
 python -m unittest -v
-python -m py_compile multi_port_checker.py network_checks.py monitoring_state.py test_ping_helpers.py test_range_scan_helpers.py test_trace_route_helpers.py test_monitoring_state.py
+python -m py_compile multi_port_checker.py network_checks.py monitoring_state.py event_history.py test_ping_helpers.py test_range_scan_helpers.py test_trace_route_helpers.py test_monitoring_state.py test_event_history.py
 ```
 
 ## Roadmap
 
 - System tray support
-- Optional notifications when a monitored service changes state
-- External status logging
+- Optional Event History date-range filtering

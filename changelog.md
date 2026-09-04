@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased — recommended v1.5.0
+
+### Added
+
+- Persistent Event History
+- Event History window
+- DOWN / RECOVERED event logging
+- CSV Export
+- Event filtering
+- Clear History
+- Event retention
+
+### Improved
+
+- Public repository examples sanitized
+- Generic fictional example naming
+- Public-repository safety rules added to AGENTS.md
+
 ## v1.4.0 - 2026-09-03
 
 - Added an optional Device Name column and input for monitored targets.

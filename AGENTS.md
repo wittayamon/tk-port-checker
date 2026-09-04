@@ -18,6 +18,7 @@ Main capabilities currently include:
 - IPv4 Range Scan with progress and cancellation
 - Trace Route with streaming output and process controls
 - TCP State Change Alerts with downtime tracking
+- Persistent Event History with filtering, CSV Export, and retention
 - Save / Load host lists
 - Auto-load saved hosts
 - Dark / Light theme
@@ -25,9 +26,27 @@ Main capabilities currently include:
 - PyInstaller EXE build support
 - Custom application icon
 
-Current release version: **v1.3.0**
+Current release version: **v1.4.0**
 
-Current recommended version for the Device Name and State Change Alert work: **v1.4.0**
+Current recommended version for Event History and CSV Export work: **v1.5.0**
+
+---
+
+## Public Repository Documentation Safety
+
+Treat this repository and every tracked file as public information.
+
+For all future changes:
+
+- Use fictional, generic names such as `Demo-PLC`, `Test-Server`, `Gateway-01`, `Router-01`, `NAS-01`, `Device-01`, and `Printer-01`
+- Use generic private addresses or reserved documentation ranges where examples need IP addresses
+- Do not include company-specific examples, real machine identifiers, internal hostnames or domains, employee/user names, actual network topology, or real infrastructure naming conventions
+- Never include credentials, passwords, API keys, tokens, private keys, Authorization headers, webhook secrets, or other secrets
+- Keep public examples sanitized in tests, documentation, source comments, sample data, screenshots, and release notes
+- Review both `README.md` and `README_TH.md` for public-safety issues whenever either is updated
+- Review screenshots and demo media before publishing; do not silently edit sensitive images without a safe replacement workflow
+- If a suspected real secret is found, do not print or duplicate its value; identify only the file and category, and recommend rotation
+- Do not inspect ignored local user data unless the task explicitly requires it
 
 ---
 
@@ -230,7 +249,7 @@ Saved host records should remain backward-compatible with:
 
 ```json
 {
-  "host": "google.com",
+  "host": "example.com",
   "port": 443
 }
 ```
@@ -251,6 +270,7 @@ Local files such as:
 ```text
 mpc_config.json
 p.json
+events.db
 ```
 
 may contain user data. Do not modify, delete, or commit them unless explicitly requested.
@@ -440,7 +460,7 @@ The current Ping implementation baseline includes:
 - Check All / Check Selected / Auto Refresh executed outside Tkinter's main thread
 - UI updates routed through `root.after()`
 - Overlap prevention for Auto Refresh
-- Config schema remains `{host, port}`
+- Config schema remains backward-compatible with `{host, port}` and supports optional `name`
 - Focused unit tests for Ping helper logic
 
 When modifying these areas, preserve this behavior unless the task explicitly requests a different design.

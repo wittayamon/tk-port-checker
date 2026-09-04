@@ -15,6 +15,7 @@ dist/
 # Local application data
 mpc_config.json
 p.json
+events.db
 
 # VS Code
 .vscode/

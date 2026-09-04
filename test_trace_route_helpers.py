@@ -11,8 +11,8 @@ from network_checks import (
 class TracertCommandTests(unittest.TestCase):
     def test_builds_default_hostname_command(self):
         self.assertEqual(
-            build_tracert_command("google.com"),
-            ["tracert", "-d", "-h", "15", "-w", "1000", "google.com"],
+            build_tracert_command("example.com"),
+            ["tracert", "-d", "-h", "15", "-w", "1000", "example.com"],
         )
 
     def test_builds_custom_ipv4_command(self):

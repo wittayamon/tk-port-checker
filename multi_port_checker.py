@@ -7,8 +7,10 @@ import subprocess
 import threading
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from tkinter import ttk, messagebox, filedialog
 
+from event_history import EventHistoryStore, EventRecord, export_events_csv
 from network_checks import (
     CHECK_WORKERS,
     DEFAULT_TRACE_MAX_HOPS,
@@ -45,11 +47,14 @@ editing_item_id = None
 network_executor = ThreadPoolExecutor(max_workers=CHECK_WORKERS, thread_name_prefix="network-check")
 trace_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="trace-route")
 trace_windows = set()
+event_history_windows = set()
 tcp_state_tracker = TcpStateTracker()
+event_history_store = None
 current_theme = "light"   # "light" หรือ "dark"
 
 # ไฟล์ config สำหรับจำ theme + host list
 CONFIG_NAME = "mpc_config.json"
+EVENT_DB_NAME = "events.db"
 COL_NAME = 0
 COL_HOST = 1
 COL_PORT = 2
@@ -68,6 +73,18 @@ def get_app_dir() -> str:
 
 def get_config_path() -> str:
     return os.path.join(get_app_dir(), CONFIG_NAME)
+
+
+def get_event_db_path() -> str:
+    """Return a writable runtime DB path, never the PyInstaller temp directory."""
+    return os.path.join(get_app_dir(), EVENT_DB_NAME)
+
+
+def get_event_history_store():
+    global event_history_store
+    if event_history_store is None:
+        event_history_store = EventHistoryStore(get_event_db_path())
+    return event_history_store
 
 
 def resource_path(relative_path: str) -> str:
@@ -309,6 +326,25 @@ def show_state_change_alerts(alerts):
             messagebox.showinfo("DEVICE RECOVERED", "\n".join(lines))
 
 
+def persist_state_change_events(alerts):
+    """Persist main-thread TCP transitions and refresh any open history windows."""
+    if not alerts:
+        return
+    store = get_event_history_store()
+    inserted = False
+    for alert in alerts:
+        event = EventRecord.from_state_change(
+            alert["event"],
+            device_name=alert["name"],
+            host=alert["host"],
+            port=alert["port"],
+            ping=alert["ping"],
+        )
+        inserted = store.insert(event) or inserted
+    if inserted:
+        refresh_event_history_windows()
+
+
 def finish_check_cycle():
     global check_in_progress, active_checks
     check_in_progress = False
@@ -334,6 +370,7 @@ def poll_check_cycle():
         alert = update_row_status(item_id, host, port, ping_text, port_online)
         if alert is not None:
             alerts.append(alert)
+    persist_state_change_events(alerts)
     show_state_change_alerts(alerts)
     finish_check_cycle()
 
@@ -737,6 +774,293 @@ def open_trace_route():
     TraceRouteWindow(root, str(values[COL_HOST]).strip())
 
 
+# ===================== Event History =====================
+
+def format_event_timestamp(timestamp: str) -> str:
+    try:
+        value = datetime.fromisoformat(timestamp)
+        if value.tzinfo is not None:
+            value = value.astimezone()
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return str(timestamp)
+
+
+class EventHistoryWindow:
+    """Display, filter, export, and clear persistent TCP state changes."""
+
+    def __init__(self, parent):
+        self.window = tk.Toplevel(parent)
+        apply_window_icon(self.window)
+        self.window.title("Event History")
+        self.window.geometry("1040x560")
+        self.window.minsize(760, 400)
+        self._closed = False
+
+        self.filter_frame = tk.Frame(self.window)
+        self.filter_frame.pack(fill="x", padx=10, pady=(10, 5))
+        self.search_label = tk.Label(self.filter_frame, text="Device / Host:")
+        self.search_label.grid(row=0, column=0, padx=(0, 5))
+        self.search_var = tk.StringVar()
+        self.search_entry = tk.Entry(
+            self.filter_frame, textvariable=self.search_var, width=28
+        )
+        self.search_entry.grid(row=0, column=1, padx=(0, 12))
+        self.search_entry.bind("<Return>", lambda _event: self.refresh())
+
+        self.type_label = tk.Label(self.filter_frame, text="Event Type:")
+        self.type_label.grid(row=0, column=2, padx=(0, 5))
+        self.type_var = tk.StringVar(value="All")
+        self.type_combo = ttk.Combobox(
+            self.filter_frame,
+            textvariable=self.type_var,
+            values=("All", "DOWN", "RECOVERED"),
+            state="readonly",
+            style="History.TCombobox",
+            width=12,
+        )
+        self.type_combo.grid(row=0, column=3, padx=(0, 12))
+        self.type_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+
+        self.filter_button = tk.Button(
+            self.filter_frame, text="Apply Filter", width=12, command=self.refresh
+        )
+        self.filter_button.grid(row=0, column=4, padx=(0, 5))
+        self.reset_button = tk.Button(
+            self.filter_frame, text="Reset", width=10, command=self.reset_filters
+        )
+        self.reset_button.grid(row=0, column=5)
+
+        self.table_frame = tk.Frame(self.window)
+        self.table_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        columns = ("timestamp", "device", "host", "port", "event", "ping", "downtime")
+        self.tree = ttk.Treeview(
+            self.table_frame,
+            columns=columns,
+            show="headings",
+            style="History.Treeview",
+        )
+        headings = {
+            "timestamp": "Date / Time",
+            "device": "Device",
+            "host": "Host / IP",
+            "port": "Port",
+            "event": "Event",
+            "ping": "Ping",
+            "downtime": "Downtime",
+        }
+        widths = {
+            "timestamp": 155,
+            "device": 145,
+            "host": 170,
+            "port": 65,
+            "event": 95,
+            "ping": 90,
+            "downtime": 95,
+        }
+        for column in columns:
+            self.tree.heading(column, text=headings[column])
+            self.tree.column(
+                column,
+                width=widths[column],
+                anchor="center" if column in ("port", "event", "ping", "downtime") else "w",
+            )
+        self.scroll_y = ttk.Scrollbar(
+            self.table_frame, orient="vertical", command=self.tree.yview
+        )
+        self.scroll_x = ttk.Scrollbar(
+            self.table_frame, orient="horizontal", command=self.tree.xview
+        )
+        self.tree.configure(
+            yscrollcommand=self.scroll_y.set, xscrollcommand=self.scroll_x.set
+        )
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.scroll_y.grid(row=0, column=1, sticky="ns")
+        self.scroll_x.grid(row=1, column=0, sticky="ew")
+        self.table_frame.grid_rowconfigure(0, weight=1)
+        self.table_frame.grid_columnconfigure(0, weight=1)
+
+        self.status_var = tk.StringVar(value="")
+        self.status_label = tk.Label(
+            self.window, textvariable=self.status_var, anchor="w"
+        )
+        self.status_label.pack(fill="x", padx=10)
+
+        self.button_frame = tk.Frame(self.window)
+        self.button_frame.pack(pady=(5, 10))
+        self.export_button = tk.Button(
+            self.button_frame, text="Export CSV", width=14, command=self.export_csv
+        )
+        self.export_button.grid(row=0, column=0, padx=5)
+        self.clear_button = tk.Button(
+            self.button_frame, text="Clear History", width=14, command=self.clear_history
+        )
+        self.clear_button.grid(row=0, column=1, padx=5)
+        self.close_button = tk.Button(
+            self.button_frame, text="Close", width=14, command=self.close
+        )
+        self.close_button.grid(row=0, column=2, padx=5)
+
+        event_history_windows.add(self)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.apply_theme(current_theme)
+        self.refresh()
+
+    def current_events(self):
+        return get_event_history_store().list_events(
+            self.search_var.get(), self.type_var.get()
+        )
+
+    def refresh(self):
+        if self._closed:
+            return
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        store = get_event_history_store()
+        events = self.current_events()
+        for event in events:
+            identifier = event.device_name or event.host
+            downtime = (
+                "-"
+                if event.downtime_seconds is None
+                else format_duration(event.downtime_seconds)
+            )
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    format_event_timestamp(event.timestamp),
+                    identifier,
+                    event.host,
+                    event.port,
+                    event.event_type,
+                    event.ping,
+                    downtime,
+                ),
+                tags=(event.event_type.lower(),),
+            )
+        if store.available:
+            self.status_var.set(f"Showing {len(events)} event(s), newest first")
+        else:
+            self.status_var.set("Event History is unavailable")
+
+    def reset_filters(self):
+        self.search_var.set("")
+        self.type_var.set("All")
+        self.refresh()
+
+    def export_csv(self):
+        events = self.current_events()
+        path = filedialog.asksaveasfilename(
+            parent=self.window,
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Export Event History",
+        )
+        if not path:
+            return
+        try:
+            count = export_events_csv(path, events)
+        except (OSError, UnicodeError) as exc:
+            messagebox.showerror(
+                "Export CSV", f"Unable to export Event History:\n{exc}", parent=self.window
+            )
+            return
+        messagebox.showinfo(
+            "Export CSV", f"Exported {count} event(s).", parent=self.window
+        )
+
+    def clear_history(self):
+        if not messagebox.askyesno(
+            "Clear History",
+            "Delete all Event History records?\n\nMonitored targets and settings are not affected.",
+            parent=self.window,
+        ):
+            return
+        if get_event_history_store().clear():
+            refresh_event_history_windows()
+            messagebox.showinfo(
+                "Clear History", "Event History was cleared.", parent=self.window
+            )
+        else:
+            messagebox.showerror(
+                "Clear History", "Unable to clear Event History.", parent=self.window
+            )
+
+    def apply_theme(self, theme: str):
+        if self._closed:
+            return
+        palette = get_theme_palette(theme)
+        self.window.configure(bg=palette["bg"])
+        for frame in (self.filter_frame, self.table_frame, self.button_frame):
+            frame.configure(bg=palette["bg"])
+        for label in (self.search_label, self.type_label, self.status_label):
+            label.configure(bg=palette["bg"], fg=palette["fg"])
+        self.search_entry.configure(
+            bg=palette["entry_bg"],
+            fg=palette["entry_fg"],
+            insertbackground=palette["entry_fg"],
+        )
+        for button in (
+            self.filter_button,
+            self.reset_button,
+            self.export_button,
+            self.clear_button,
+            self.close_button,
+        ):
+            button.configure(
+                bg=palette["button_bg"],
+                fg=palette["fg"],
+                activebackground=palette["button_bg"],
+                activeforeground=palette["fg"],
+            )
+        style = ttk.Style()
+        style.configure(
+            "History.Treeview",
+            background=palette["tree_bg"],
+            foreground=palette["tree_fg"],
+            fieldbackground=palette["tree_bg"],
+        )
+        style.configure(
+            "History.Treeview.Heading",
+            background=palette["button_bg"],
+            foreground=palette["fg"],
+        )
+        style.configure(
+            "History.TCombobox",
+            fieldbackground=palette["entry_bg"],
+            background=palette["button_bg"],
+            foreground=palette["entry_fg"],
+            arrowcolor=palette["fg"],
+        )
+        style.map(
+            "History.TCombobox",
+            fieldbackground=[("readonly", palette["entry_bg"])],
+            foreground=[("readonly", palette["entry_fg"])],
+        )
+        self.tree.tag_configure("down", foreground="#c62828")
+        self.tree.tag_configure("recovered", foreground="#2e7d32")
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        event_history_windows.discard(self)
+        try:
+            self.window.destroy()
+        except tk.TclError:
+            pass
+
+
+def refresh_event_history_windows():
+    for history_window in tuple(event_history_windows):
+        history_window.refresh()
+
+
+def open_event_history():
+    EventHistoryWindow(root)
+
+
 # ===================== IPv4 Range Scan =====================
 
 def set_scan_controls(running: bool):
@@ -1037,6 +1361,8 @@ def on_close():
             pass
     for trace_window in tuple(trace_windows):
         trace_window.close()
+    for history_window in tuple(event_history_windows):
+        history_window.close()
     save_config()
     network_executor.shutdown(wait=False, cancel_futures=True)
     trace_executor.shutdown(wait=False, cancel_futures=True)
@@ -1208,6 +1534,7 @@ def apply_theme(theme: str):
         btn_check_sel,
         btn_check_all,
         btn_trace,
+        btn_history,
         btn_start_auto,
         btn_stop_auto,
         btn_save,
@@ -1242,6 +1569,8 @@ def apply_theme(theme: str):
 
     for trace_window in tuple(trace_windows):
         trace_window.apply_theme(theme)
+    for history_window in tuple(event_history_windows):
+        history_window.apply_theme(theme)
 
 
 # ===================== GUI =====================
@@ -1267,7 +1596,7 @@ lbl_host.grid(row=0, column=2, padx=(0, 5))
 
 entry_host = tk.Entry(frame_top, width=25)
 entry_host.grid(row=0, column=3, padx=(0, 10))
-entry_host.insert(0, "google.com")
+entry_host.insert(0, "example.com")
 
 lbl_port = tk.Label(frame_top, text="Port:")
 lbl_port.grid(row=0, column=4, padx=(0, 5))
@@ -1375,6 +1704,11 @@ btn_check_all.grid(row=0, column=1, padx=5)
 
 btn_trace = tk.Button(frame_bottom, text="Trace Route", width=15, command=open_trace_route)
 btn_trace.grid(row=0, column=2, padx=5)
+
+btn_history = tk.Button(
+    frame_bottom, text="Event History", width=15, command=open_event_history
+)
+btn_history.grid(row=0, column=3, padx=5)
 
 lbl_interval = tk.Label(frame_bottom, text="Interval (sec):")
 lbl_interval.grid(row=1, column=0, pady=(10, 0))
