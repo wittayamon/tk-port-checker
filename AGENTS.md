@@ -19,6 +19,7 @@ Main capabilities currently include:
 - Trace Route with streaming output and process controls
 - TCP State Change Alerts with downtime tracking
 - Persistent Event History with filtering, CSV Export, and retention
+- Native Windows System Tray with background monitoring controls
 - Save / Load host lists
 - Auto-load saved hosts
 - Dark / Light theme
@@ -26,9 +27,9 @@ Main capabilities currently include:
 - PyInstaller EXE build support
 - Custom application icon
 
-Current release version: **v1.4.0**
+Current release version: **v1.5.0**
 
-Current recommended version for Event History and CSV Export work: **v1.5.0**
+Current recommended version for Windows System Tray work: **v1.6.0**
 
 ---
 
@@ -69,7 +70,7 @@ Before modifying the project:
 
 Keep the current release-oriented structure unless a task explicitly authorizes a larger migration:
 
-- Application modules remain at repository root: `multi_port_checker.py`, `network_checks.py`, `monitoring_state.py`, and `event_history.py`
+- Application modules remain at repository root: `multi_port_checker.py`, `network_checks.py`, `monitoring_state.py`, `event_history.py`, and `windows_tray.py`
 - Unit tests live under `tests/`
 - Static application assets live under `assets/`
 - Future sanitized documentation images belong under `docs/images/`
@@ -82,7 +83,7 @@ Canonical verification commands from repository root are:
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py tests
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py windows_tray.py tests
 pyinstaller --clean --noconfirm MultiPortChecker.spec
 ```
 
@@ -252,6 +253,24 @@ root.after(...)
 to send UI updates back to Tkinter.
 
 Do not call Treeview, Label, Button, Entry, or other Tkinter widget mutation methods directly from worker threads.
+
+---
+
+## Windows System Tray Architecture
+
+System Tray changes must preserve these invariants:
+
+- Tkinter widgets may only be read or modified on Tk's main thread
+- Native tray callbacks must enqueue actions and marshal them through `root.after()` or an equivalent main-thread queue; they must never call Tk directly
+- Only one tray icon and one native tray message loop may exist per application instance
+- Only the existing Auto Refresh scheduling path may be used; tray commands must not create a second timer or executor
+- Tray Open must restore the existing Tk root, never create another root
+- Tray Check All, Start Auto Refresh, Stop Auto Refresh, and Event History must reuse the existing application actions
+- Tray Exit and every other real-exit path must converge on the canonical idempotent application shutdown
+- Shutdown must remove the tray icon/message loop and preserve existing executor, Trace Route, Event History, and Tk cleanup behavior
+- The Windows tray implementation must remain compatible with the tracked `MultiPortChecker.spec` and shared icon under `assets/`
+- Do not add `pystray`, Pillow, pywin32, or another runtime dependency without explicit user approval and a concrete maintainability justification
+- Update both `README.md` and `README_TH.md` for tray behavior changes, and keep all examples compliant with the mandatory public-repository safety rules
 
 ---
 

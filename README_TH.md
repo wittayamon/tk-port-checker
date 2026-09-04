@@ -36,6 +36,8 @@
 - บันทึกและโหลดรายการ Host ในรูปแบบ JSON
 - โหลด Host ที่บันทึกไว้และการตั้งค่า theme โดยอัตโนมัติ
 - Theme แบบ Dark และ Light
+- Windows System Tray แบบ native พร้อมตัวควบคุมการเฝ้าติดตามเบื้องหลัง
+- Minimize-to-Tray แบบเลือกได้และ Close-to-Tray ที่บันทึกการตั้งค่า
 - การจัดการ icon และ resource ที่รองรับ PyInstaller
 
 ## Device Name และข้อมูลเป้าหมาย
@@ -114,6 +116,22 @@ Device Name | Host / IP | Port | Ping (ms) | Status
 
 Ping ยังคงเป็นข้อมูลสำหรับวินิจฉัย Ping `Timeout` จะไม่ทำให้เกิดการแจ้งเตือน DOWN ตราบใดที่ TCP Port ยัง ONLINE เป้าหมาย runtime ที่ค้นพบจาก IP Range Scan จะไม่เข้าร่วมการแจ้งเตือนจนกว่าจะถูกยกระดับให้เป็นเป้าหมายถาวร
 
+## Windows System Tray
+
+ไอคอน notification area แบบ native ของ Windows จะเริ่มพร้อมแอปโดยไม่ใช้ runtime dependency ภายนอก เมื่อเริ่มโปรแกรม หน้าต่างหลักจะยังแสดงตามปกติและแอปจะไม่เริ่มแบบซ่อน
+
+เมนู tray มี **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History** และ **Exit** คำสั่งเหล่านี้ใช้เส้นทางการเฝ้าติดตามและ Auto Refresh เดิม จึงมีรอบตรวจสอบและ Auto Refresh timer เพียงชุดเดียว **Event History** จะคืนหน้าต่างหลักและเปิดหรือโฟกัสหน้าต่างประวัติที่มีอยู่
+
+- **Hide to Tray** ซ่อนหน้าต่างหลักโดยตั้งใจ ขณะที่การเฝ้าติดตามยังทำงานต่อ
+- **Minimize to tray** เลือกให้การ minimize ปกติเปลี่ยนเป็นการซ่อนได้ โดยค่าเริ่มต้นปิดอยู่
+- **Close button minimizes to tray** เปิดโดยค่าเริ่มต้น เมื่อเปิดไว้ ปุ่ม X ของหน้าต่างหลักจะซ่อนแอปแทนการออก เมื่อปิดค่านี้ ปุ่ม X จะออกจากโปรแกรมทั้งหมด
+- การตั้งค่า tray ทั้งสองค่าบันทึกใน `mpc_config.json` โดย config รุ่นเก่าจะใช้ค่าเริ่มต้นที่ปลอดภัยข้างต้น
+- Auto Refresh, การติดตาม TCP State Change, การคำนวณ downtime และการบันทึก Event History ทำงานต่อขณะซ่อน โดยไม่สร้าง monitoring loop เพิ่ม
+- กล่องแจ้งเตือน Tk แบบ native จะถูกพักไว้ขณะซ่อนและแสดงหลังคืนหน้าต่างหลัก เพื่อไม่ให้ modal dialog ที่มองไม่เห็นขัดขวางการเฝ้าติดตามเบื้องหลัง
+- ใช้คำสั่ง **Exit** ในเมนู tray เพื่อปิด tray icon, monitoring executor, กระบวนการ Trace Route, หน้าต่าง Event History และแอป Tk อย่างสมบูรณ์
+
+หากเริ่มไอคอน Windows tray ไม่สำเร็จ ปุ่ม Hide to Tray จะถูกปิดใช้งานและปุ่ม X ของหน้าต่างหลักจะออกจากโปรแกรมตามปกติ
+
 ## Event History
 
 เลือก **Event History** เพื่อเปิดหน้าต่างแยกที่รองรับ theme และแสดงการเปลี่ยนสถานะ TCP แบบถาวรโดยเรียงรายการใหม่สุดก่อน ผลค่าอ้างอิง (`UNKNOWN -> ONLINE` และ `UNKNOWN -> OFFLINE`) จะไม่ถูกบันทึก สถานะที่ซ้ำกัน, การเปลี่ยนเฉพาะ Ping, ผล Trace Route และเป้าหมายชั่วคราวจาก IP Range Scan จะไม่สร้างประวัติเช่นกัน
@@ -176,6 +194,7 @@ multi_port_checker.py       Tkinter UI and background task coordination
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
 event_history.py            SQLite Event History and CSV export helpers
+windows_tray.py             Native Windows notification-area integration
 assets/
   icon_network_transparent.ico
 tests/
@@ -184,6 +203,7 @@ tests/
   test_trace_route_helpers.py Trace command and input-validation tests
   test_monitoring_state.py    Device-record, transition, and duration tests
   test_event_history.py       Event storage, filtering, retention, and CSV tests
+  test_tray_helpers.py        Tray preferences, actions, and lifecycle tests
 MultiPortChecker.spec       PyInstaller build configuration
 README.md
 README_TH.md
@@ -196,10 +216,10 @@ Screenshot สำหรับเอกสารในอนาคตต้อง
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py tests
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py windows_tray.py tests
 ```
 
 ## แผนงานในอนาคต
 
-- รองรับ System tray
+- การแจ้งเตือนผ่าน Windows toast/webhook
 - การกรอง Event History ตามช่วงวันที่

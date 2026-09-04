@@ -36,6 +36,8 @@ The Ping and TCP results are independent: a host can respond to Ping while its c
 - Save and load JSON host lists
 - Auto-load saved hosts and theme configuration
 - Dark and Light themes
+- Native Windows System Tray with background monitoring controls
+- Optional Minimize-to-Tray and persisted Close-to-Tray behavior
 - PyInstaller-compatible icon and resource handling
 
 ## Device Names and target data
@@ -114,6 +116,22 @@ Alerts track only TCP status during **Check Selected**, **Check All**, and **Aut
 
 Ping remains diagnostic information. A Ping `Timeout` does not cause a DOWN alert while the TCP Port remains ONLINE. Runtime IP Range Scan discoveries do not participate in alerts unless they are promoted to persistent monitored targets.
 
+## Windows System Tray
+
+The native Windows notification-area icon starts with the application without any third-party runtime dependency. Startup still shows the normal main window; the application does not start hidden.
+
+The tray menu provides **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History**, and **Exit**. These actions reuse the existing monitoring and Auto Refresh paths, so only one check cycle and one Auto Refresh timer can run. **Event History** restores the application and opens or focuses the existing history window.
+
+- **Hide to Tray** explicitly hides the main window while monitoring continues.
+- **Minimize to tray** optionally converts normal minimization into hiding. It is disabled by default.
+- **Close button minimizes to tray** is enabled by default. With it enabled, the main window's X hides the application instead of exiting. With it disabled, X fully exits.
+- Both tray preferences are stored in `mpc_config.json`; older configs use the safe defaults above.
+- Auto Refresh, TCP State Change tracking, downtime calculation, and Event History persistence continue while hidden without creating another monitoring loop.
+- Native Tk alert dialogs are deferred while hidden and displayed after the main window is restored, preventing an invisible modal dialog from blocking background monitoring.
+- Use the tray menu's **Exit** command for a guaranteed full shutdown of the tray icon, monitoring executors, Trace Route processes, Event History windows, and Tk application.
+
+If the Windows tray icon cannot be initialized, Hide to Tray is disabled and the main-window X exits normally.
+
 ## Event History
 
 Choose **Event History** to open a separate, themed window containing persistent TCP state changes, newest first. Baseline results (`UNKNOWN -> ONLINE` and `UNKNOWN -> OFFLINE`) are not logged. Repeated states, Ping-only changes, Trace Route results, and transient IP Range Scan discoveries also do not create history records.
@@ -176,6 +194,7 @@ multi_port_checker.py       Tkinter UI and background task coordination
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
 event_history.py            SQLite Event History and CSV export helpers
+windows_tray.py             Native Windows notification-area integration
 assets/
   icon_network_transparent.ico
 tests/
@@ -184,6 +203,7 @@ tests/
   test_trace_route_helpers.py Trace command and input-validation tests
   test_monitoring_state.py    Device-record, transition, and duration tests
   test_event_history.py       Event storage, filtering, retention, and CSV tests
+  test_tray_helpers.py        Tray preferences, actions, and lifecycle tests
 MultiPortChecker.spec       PyInstaller build configuration
 README.md
 README_TH.md
@@ -196,10 +216,10 @@ Future documentation screenshots must use sanitized fictional data and belong un
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py tests
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py windows_tray.py tests
 ```
 
 ## Roadmap
 
-- System tray support
+- Windows toast/webhook notifications
 - Optional Event History date-range filtering

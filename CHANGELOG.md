@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased — recommended v1.6.0
+
+### Added
+
+- Native Windows System Tray support without third-party runtime dependencies.
+- Tray menu actions for Open, Check All, Auto Refresh, Event History, and Exit.
+- Persisted Minimize-to-Tray and Close-to-Tray preferences.
+- Background monitoring while the main window is hidden.
+
+### Improved
+
+- Unified real-exit shutdown and idempotent tray cleanup.
+- Continued State Change and Event History processing while hidden.
+- Deferred Tk alert dialogs until the hidden main window is restored.
+
 ## v1.5.0 - 2026-09-04
 
 ### Added

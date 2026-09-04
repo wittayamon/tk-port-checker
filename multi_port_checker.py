@@ -28,6 +28,19 @@ from monitoring_state import (
     make_host_record,
     normalize_host_record,
 )
+from windows_tray import (
+    ShutdownGuard,
+    TRAY_ACTION_CHECK_ALL,
+    TRAY_ACTION_EVENT_HISTORY,
+    TRAY_ACTION_EXIT,
+    TRAY_ACTION_OPEN,
+    TRAY_ACTION_START_AUTO,
+    TRAY_ACTION_STOP_AUTO,
+    WindowsTrayIcon,
+    should_close_to_tray,
+    tray_icon_relative_path,
+    tray_preferences_from_config,
+)
 
 # ===================== Global flags =====================
 
@@ -50,6 +63,13 @@ trace_windows = set()
 event_history_windows = set()
 tcp_state_tracker = TcpStateTracker()
 event_history_store = None
+tray_action_queue = queue.Queue()
+tray_icon = None
+tray_poll_after_id = None
+tray_available = False
+main_window_hidden = False
+pending_hidden_alerts = []
+shutdown_guard = ShutdownGuard()
 current_theme = "light"   # "light" หรือ "dark"
 
 # ไฟล์ config สำหรับจำ theme + host list
@@ -285,9 +305,12 @@ def update_row_status(
     }
 
 
-def show_state_change_alerts(alerts):
+def show_state_change_alerts(alerts, *, allow_defer=True):
     """Display state changes from Tk's main thread with simple flood protection."""
     if not alerts or not state_change_alerts_var.get():
+        return
+    if allow_defer and main_window_hidden:
+        pending_hidden_alerts.extend(alerts)
         return
     if len(alerts) > 3:
         lines = []
@@ -1058,7 +1081,19 @@ def refresh_event_history_windows():
 
 
 def open_event_history():
-    EventHistoryWindow(root)
+    for history_window in tuple(event_history_windows):
+        if history_window._closed:
+            event_history_windows.discard(history_window)
+            continue
+        try:
+            history_window.window.deiconify()
+            history_window.window.lift()
+            history_window.window.focus_force()
+            history_window.refresh()
+            return history_window
+        except tk.TclError:
+            event_history_windows.discard(history_window)
+    return EventHistoryWindow(root)
 
 
 # ===================== IPv4 Range Scan =====================
@@ -1291,6 +1326,8 @@ def save_config():
     config = {
         "theme": current_theme,
         "state_change_alerts": bool(state_change_alerts_var.get()),
+        "minimize_to_tray": bool(minimize_to_tray_var.get()),
+        "close_to_tray": bool(close_to_tray_var.get()),
         "hosts": hosts,
     }
 
@@ -1326,6 +1363,9 @@ def load_config():
         current_theme = theme
 
     state_change_alerts_var.set(alert_enabled_from_config(config))
+    tray_preferences = tray_preferences_from_config(config)
+    minimize_to_tray_var.set(tray_preferences.minimize_to_tray)
+    close_to_tray_var.set(tray_preferences.close_to_tray)
 
     # hosts
     hosts = config.get("hosts", [])
@@ -1346,27 +1386,169 @@ def load_config():
         )
 
 
-def on_close():
-    """เรียกตอนกดปิดหน้าต่าง"""
-    global auto_running
+# ===================== Windows System Tray / shutdown =====================
+
+def enqueue_tray_action(action: str) -> None:
+    """Receive a native tray callback without touching Tkinter from its thread."""
+    tray_action_queue.put(action)
+
+
+def refresh_tray_menu_state() -> None:
+    if tray_icon is not None:
+        tray_icon.update_state(auto_running=auto_running)
+
+
+def start_tray_support() -> bool:
+    global tray_icon, tray_available, tray_poll_after_id
+    tray_icon = WindowsTrayIcon(
+        resource_path(tray_icon_relative_path()), enqueue_tray_action
+    )
+    tray_icon.update_state(auto_running=auto_running)
+    tray_available = tray_icon.start()
+    if not tray_available:
+        btn_hide_tray.configure(state="disabled")
+        if tray_icon.startup_error:
+            print("System tray unavailable:", tray_icon.startup_error)
+        return False
+    tray_poll_after_id = root.after(50, poll_tray_actions)
+    return True
+
+
+def hide_main_window() -> bool:
+    global main_window_hidden
+    if shutdown_guard.started:
+        return False
+    if not tray_available:
+        messagebox.showwarning(
+            "System Tray",
+            "The Windows notification-area icon is unavailable.",
+            parent=root,
+        )
+        return False
+    main_window_hidden = True
+    root.withdraw()
+    return True
+
+
+def restore_main_window() -> None:
+    global main_window_hidden
+    if shutdown_guard.started:
+        return
+    main_window_hidden = False
+    root.deiconify()
+    try:
+        root.state("normal")
+    except tk.TclError:
+        pass
+    root.lift()
+    root.focus_force()
+    if pending_hidden_alerts:
+        alerts = list(pending_hidden_alerts)
+        pending_hidden_alerts.clear()
+        root.after_idle(
+            lambda queued_alerts=alerts: show_state_change_alerts(
+                queued_alerts, allow_defer=False
+            )
+        )
+
+
+def handle_root_unmap(event=None) -> None:
+    """Convert an ordinary minimize into Hide to Tray only when requested."""
+    if event is not None and event.widget is not root:
+        return
+    if not minimize_to_tray_var.get() or not tray_available:
+        return
+
+    def hide_if_iconic():
+        if not shutdown_guard.started and root.state() == "iconic":
+            hide_main_window()
+
+    root.after_idle(hide_if_iconic)
+
+
+def handle_tray_action(action: str) -> None:
+    """Run one queued tray action on Tk's main thread."""
+    if action == TRAY_ACTION_OPEN:
+        restore_main_window()
+    elif action == TRAY_ACTION_CHECK_ALL:
+        if not tree.get_children():
+            restore_main_window()
+        check_all()
+    elif action == TRAY_ACTION_START_AUTO:
+        interval_text = entry_interval.get().strip()
+        if not interval_text.isdigit() or int(interval_text) <= 0:
+            restore_main_window()
+        start_auto()
+    elif action == TRAY_ACTION_STOP_AUTO:
+        stop_auto()
+    elif action == TRAY_ACTION_EVENT_HISTORY:
+        restore_main_window()
+        open_event_history()
+    elif action == TRAY_ACTION_EXIT:
+        shutdown_application()
+
+
+def poll_tray_actions() -> None:
+    global tray_poll_after_id
+    tray_poll_after_id = None
+    if shutdown_guard.started:
+        return
+    try:
+        while True:
+            handle_tray_action(tray_action_queue.get_nowait())
+            if shutdown_guard.started:
+                return
+    except queue.Empty:
+        pass
+    tray_poll_after_id = root.after(50, poll_tray_actions)
+
+
+def on_close() -> None:
+    """Handle the main-window X according to the persisted tray preference."""
+    if should_close_to_tray(close_to_tray_var.get(), tray_available):
+        hide_main_window()
+        return
+    shutdown_application()
+
+
+def shutdown_application() -> bool:
+    """Idempotent canonical cleanup used by every real Exit action."""
+    global auto_running, tray_poll_after_id, tray_available, main_window_hidden
+    if not shutdown_guard.begin():
+        return False
+
     auto_running = False
-    if scan_running and scan_plan is not None:
-        scan_plan.cancel()
-        for future in tuple(scan_pending):
-            future.cancel()
+    main_window_hidden = False
     if auto_after_id is not None:
         try:
             root.after_cancel(auto_after_id)
         except tk.TclError:
             pass
+    if tray_poll_after_id is not None:
+        try:
+            root.after_cancel(tray_poll_after_id)
+        except tk.TclError:
+            pass
+        tray_poll_after_id = None
+    if scan_running and scan_plan is not None:
+        scan_plan.cancel()
+        for future in tuple(scan_pending):
+            future.cancel()
     for trace_window in tuple(trace_windows):
         trace_window.close()
     for history_window in tuple(event_history_windows):
         history_window.close()
     save_config()
+    if tray_icon is not None:
+        tray_icon.stop()
+    tray_available = False
     network_executor.shutdown(wait=False, cancel_futures=True)
     trace_executor.shutdown(wait=False, cancel_futures=True)
-    root.destroy()
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+    return True
 
 
 # ===================== Auto Refresh =====================
@@ -1386,6 +1568,7 @@ def start_auto():
         auto_after_id = None
     btn_start_auto.config(state="disabled")
     btn_stop_auto.config(state="normal")
+    refresh_tray_menu_state()
     auto_loop()
 
 
@@ -1397,6 +1580,7 @@ def stop_auto():
         auto_after_id = None
     btn_start_auto.config(state="normal")
     btn_stop_auto.config(state="disabled")
+    refresh_tray_menu_state()
 
 
 def auto_loop():
@@ -1517,7 +1701,12 @@ def apply_theme(theme: str):
     ):
         ent.configure(bg=entry_bg, fg=entry_fg, insertbackground=entry_fg)
 
-    for checkbox in (chk_show_all, chk_state_alerts):
+    for checkbox in (
+        chk_show_all,
+        chk_state_alerts,
+        chk_minimize_tray,
+        chk_close_tray,
+    ):
         checkbox.configure(
             bg=bg,
             fg=fg,
@@ -1542,6 +1731,7 @@ def apply_theme(theme: str):
         btn_theme,
         btn_scan,
         btn_cancel_scan,
+        btn_hide_tray,
     ):
         btn.configure(bg=button_bg, fg=fg, activebackground=button_bg, activeforeground=fg)
 
@@ -1740,11 +1930,36 @@ chk_state_alerts = tk.Checkbutton(
 )
 chk_state_alerts.grid(row=2, column=3, padx=5, pady=(10, 0), sticky="w")
 
+btn_hide_tray = tk.Button(
+    frame_bottom, text="Hide to Tray", width=15, command=hide_main_window
+)
+btn_hide_tray.grid(row=3, column=0, padx=5, pady=(10, 0))
+
+minimize_to_tray_var = tk.BooleanVar(value=False)
+chk_minimize_tray = tk.Checkbutton(
+    frame_bottom,
+    text="Minimize to tray",
+    variable=minimize_to_tray_var,
+)
+chk_minimize_tray.grid(row=3, column=1, padx=5, pady=(10, 0), sticky="w")
+
+close_to_tray_var = tk.BooleanVar(value=True)
+chk_close_tray = tk.Checkbutton(
+    frame_bottom,
+    text="Close button minimizes to tray",
+    variable=close_to_tray_var,
+)
+chk_close_tray.grid(
+    row=3, column=2, columnspan=2, padx=5, pady=(10, 0), sticky="w"
+)
+
 # โหลด config (theme + hosts) ก่อน apply_theme
 load_config()
 apply_theme(current_theme)
 
 # handle ตอนปิด
 root.protocol("WM_DELETE_WINDOW", on_close)
+root.bind("<Unmap>", handle_root_unmap, add="+")
+start_tray_support()
 
 root.mainloop()
