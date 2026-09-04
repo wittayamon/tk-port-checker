@@ -164,10 +164,10 @@ Older records containing only `host` and `port` remain compatible and load with 
 Install PyInstaller in the build environment, then use the tracked spec file:
 
 ```powershell
-pyinstaller --noconfirm MultiPortChecker.spec
+pyinstaller --clean --noconfirm MultiPortChecker.spec
 ```
 
-The executable is created at `dist\MultiPortChecker.exe`. Python is not required on the target computer.
+The executable is created at `dist\MultiPortChecker.exe`. The canonical tracked spec packages `assets/icon_network_transparent.ico` for both the executable and application windows. Python is not required on the target computer.
 
 ## Project structure
 
@@ -176,23 +176,27 @@ multi_port_checker.py       Tkinter UI and background task coordination
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
 event_history.py            SQLite Event History and CSV export helpers
-test_ping_helpers.py        Ping/TCP helper tests
-test_range_scan_helpers.py  IPv4 range, duplicate-key, and cancellation tests
-test_trace_route_helpers.py Trace command and input-validation tests
-test_monitoring_state.py    Device-record, transition, and duration tests
-test_event_history.py       Event storage, filtering, retention, and CSV tests
+assets/
+  icon_network_transparent.ico
+tests/
+  test_ping_helpers.py        Ping/TCP helper tests
+  test_range_scan_helpers.py  IPv4 range, duplicate-key, and cancellation tests
+  test_trace_route_helpers.py Trace command and input-validation tests
+  test_monitoring_state.py    Device-record, transition, and duration tests
+  test_event_history.py       Event storage, filtering, retention, and CSV tests
 MultiPortChecker.spec       PyInstaller build configuration
-icon_network_transparent.ico
 README.md
 README_TH.md
-changelog.md
+CHANGELOG.md
 ```
+
+Future documentation screenshots must use sanitized fictional data and belong under `docs/images/`. No documentation screenshot is currently included.
 
 ## Tests
 
 ```powershell
-python -m unittest -v
-python -m py_compile multi_port_checker.py network_checks.py monitoring_state.py event_history.py test_ping_helpers.py test_range_scan_helpers.py test_trace_route_helpers.py test_monitoring_state.py test_event_history.py
+python -m unittest discover -s tests -v
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py tests
 ```
 
 ## Roadmap

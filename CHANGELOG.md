@@ -19,6 +19,10 @@ All notable changes to this project are documented here.
 - Public repository examples sanitized
 - Generic fictional example naming
 - Public-repository safety rules added to AGENTS.md
+- Reorganized tests and application assets.
+- Standardized the `CHANGELOG.md` filename.
+- Removed the obsolete unsanitized screenshot.
+- Tracked the canonical PyInstaller build configuration.
 
 ## v1.4.0 - 2026-09-03
 

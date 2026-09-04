@@ -99,7 +99,7 @@ def resource_path(relative_path: str) -> str:
 def apply_window_icon(window) -> None:
     """Apply the shared app icon without failing when the resource is unavailable."""
     try:
-        window.iconbitmap(resource_path("icon_network_transparent.ico"))
+        window.iconbitmap(resource_path("assets/icon_network_transparent.ico"))
     except Exception:
         pass
 

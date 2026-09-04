@@ -164,10 +164,10 @@ python multi_port_checker.py
 ติดตั้ง PyInstaller ใน build environment แล้วใช้ spec file ที่ track ไว้:
 
 ```powershell
-pyinstaller --noconfirm MultiPortChecker.spec
+pyinstaller --clean --noconfirm MultiPortChecker.spec
 ```
 
-ไฟล์ที่รันได้จะถูกสร้างที่ `dist\MultiPortChecker.exe` เครื่องปลายทางไม่จำเป็นต้องติดตั้ง Python
+ไฟล์ที่รันได้จะถูกสร้างที่ `dist\MultiPortChecker.exe` canonical spec ที่ track ไว้จะรวม `assets/icon_network_transparent.ico` สำหรับทั้ง executable และหน้าต่างแอป เครื่องปลายทางไม่จำเป็นต้องติดตั้ง Python
 
 ## โครงสร้างโปรเจกต์
 
@@ -176,23 +176,27 @@ multi_port_checker.py       Tkinter UI and background task coordination
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
 event_history.py            SQLite Event History and CSV export helpers
-test_ping_helpers.py        Ping/TCP helper tests
-test_range_scan_helpers.py  IPv4 range, duplicate-key, and cancellation tests
-test_trace_route_helpers.py Trace command and input-validation tests
-test_monitoring_state.py    Device-record, transition, and duration tests
-test_event_history.py       Event storage, filtering, retention, and CSV tests
+assets/
+  icon_network_transparent.ico
+tests/
+  test_ping_helpers.py        Ping/TCP helper tests
+  test_range_scan_helpers.py  IPv4 range, duplicate-key, and cancellation tests
+  test_trace_route_helpers.py Trace command and input-validation tests
+  test_monitoring_state.py    Device-record, transition, and duration tests
+  test_event_history.py       Event storage, filtering, retention, and CSV tests
 MultiPortChecker.spec       PyInstaller build configuration
-icon_network_transparent.ico
 README.md
 README_TH.md
-changelog.md
+CHANGELOG.md
 ```
+
+Screenshot สำหรับเอกสารในอนาคตต้องใช้ข้อมูลสมมติที่ผ่านการตรวจสอบความปลอดภัยและเก็บไว้ใต้ `docs/images/` ขณะนี้ยังไม่มี screenshot สำหรับเอกสารใน repository
 
 ## การทดสอบ
 
 ```powershell
-python -m unittest -v
-python -m py_compile multi_port_checker.py network_checks.py monitoring_state.py event_history.py test_ping_helpers.py test_range_scan_helpers.py test_trace_route_helpers.py test_monitoring_state.py test_event_history.py
+python -m unittest discover -s tests -v
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py tests
 ```
 
 ## แผนงานในอนาคต

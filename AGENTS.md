@@ -65,6 +65,31 @@ Before modifying the project:
 
 ---
 
+## Repository Layout
+
+Keep the current release-oriented structure unless a task explicitly authorizes a larger migration:
+
+- Application modules remain at repository root: `multi_port_checker.py`, `network_checks.py`, `monitoring_state.py`, and `event_history.py`
+- Unit tests live under `tests/`
+- Static application assets live under `assets/`
+- Future sanitized documentation images belong under `docs/images/`
+- `MultiPortChecker.spec` is the tracked canonical PyInstaller production configuration at repository root
+- The changelog filename is `CHANGELOG.md`
+- `README.md` and `README_TH.md` must remain synchronized under the bilingual documentation rules below
+- Runtime/user data such as `events.db`, `mpc_config.json`, `p.json`, `list.json`, CSV exports, and saved host lists must not be committed or packaged
+
+Canonical verification commands from repository root are:
+
+```powershell
+python -m unittest discover -s tests -v
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py tests
+pyinstaller --clean --noconfirm MultiPortChecker.spec
+```
+
+Do not add unsanitized screenshots. A public documentation screenshot may be added only after review and must be stored under `docs/images/`.
+
+---
+
 ## README.md / README_TH.md Maintenance — REQUIRED
 
 Whenever a change affects user-visible behavior, installation, configuration, usage, build steps, features, screenshots, release information, or project structure, **README.md and README_TH.md must both be reviewed and updated in the same task**.
@@ -387,9 +412,11 @@ dist/
 *.spec
 mpc_config.json
 p.json
+list.json
+events.db
 ```
 
-Exception: an existing `.spec` file may intentionally be tracked if the project uses it as the canonical build configuration. Inspect the repository before changing `.gitignore`.
+Exception: `MultiPortChecker.spec` is intentionally tracked as the canonical build configuration and must be explicitly unignored after the generic `*.spec` rule.
 
 Do not remove tracked build configuration just because it matches a generic ignore rule.
 
