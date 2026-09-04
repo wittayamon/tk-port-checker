@@ -2,23 +2,24 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased — recommended v1.5.0
+## v1.5.0 - 2026-09-04
 
 ### Added
 
-- Persistent Event History
-- Event History window
+- Persistent Event History backed by SQLite
+- Newest-first Event History window
 - DOWN / RECOVERED event logging
-- CSV Export
-- Event filtering
+- Device/Host search and DOWN / RECOVERED event filtering
+- Filter-aware CSV Export with UTF-8/Unicode support
 - Clear History
-- Event retention
+- Automatic retention of the newest 10,000 events
 
 ### Improved
 
 - Public repository examples sanitized
 - Generic fictional example naming
 - Public-repository safety rules added to AGENTS.md
+- Excluded initial baseline states, repeated states, Ping-only changes, and transient IP Range Scan results from Event History.
 - Reorganized tests and application assets.
 - Standardized the `CHANGELOG.md` filename.
 - Removed the obsolete unsanitized screenshot.
