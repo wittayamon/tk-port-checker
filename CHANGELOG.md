@@ -2,19 +2,19 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased — recommended v1.6.0
+## v1.6.0 - 2026-09-04
 
 ### Added
 
-- Native Windows System Tray support without third-party runtime dependencies.
-- Tray menu actions for Open, Check All, Auto Refresh, Event History, and Exit.
-- Persisted Minimize-to-Tray and Close-to-Tray preferences.
+- Native Windows System Tray support using standard-library `ctypes` and Windows Shell APIs without third-party runtime dependencies.
+- Tray menu actions for Open MultiPortChecker, Check All, Start Auto Refresh, Stop Auto Refresh, Event History, and Exit.
+- Hide to Tray plus persisted optional Minimize-to-Tray and default-enabled Close-to-Tray preferences.
 - Background monitoring while the main window is hidden.
 
 ### Improved
 
-- Unified real-exit shutdown and idempotent tray cleanup.
-- Continued State Change and Event History processing while hidden.
+- Unified real-exit shutdown with idempotent tray and process cleanup.
+- Continued DOWN / RECOVERED tracking, downtime calculation, and Event History persistence while hidden.
 - Deferred Tk alert dialogs until the hidden main window is restored.
 
 ## v1.5.0 - 2026-09-04
