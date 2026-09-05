@@ -2,6 +2,7 @@
 
 import ctypes
 import os
+import queue
 import sys
 import threading
 from ctypes import wintypes
@@ -14,6 +15,7 @@ TRAY_ACTION_CHECK_ALL = "check_all"
 TRAY_ACTION_START_AUTO = "start_auto"
 TRAY_ACTION_STOP_AUTO = "stop_auto"
 TRAY_ACTION_EVENT_HISTORY = "event_history"
+TRAY_ACTION_NOTIFICATION_SETTINGS = "notification_settings"
 TRAY_ACTION_EXIT = "exit"
 
 TRAY_MENU_ACTIONS = {
@@ -22,7 +24,8 @@ TRAY_MENU_ACTIONS = {
     1003: TRAY_ACTION_START_AUTO,
     1004: TRAY_ACTION_STOP_AUTO,
     1005: TRAY_ACTION_EVENT_HISTORY,
-    1006: TRAY_ACTION_EXIT,
+    1006: TRAY_ACTION_NOTIFICATION_SETTINGS,
+    1007: TRAY_ACTION_EXIT,
 }
 
 
@@ -99,6 +102,7 @@ class WindowsTrayIcon:
         self._ready = threading.Event()
         self._hwnd = None
         self._running = False
+        self._notification_queue = queue.Queue(maxsize=64)
         self.startup_error: Optional[str] = None
 
     @property
@@ -147,6 +151,29 @@ class WindowsTrayIcon:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
 
+    def show_notification(self, title: str, message: str, warning: bool = False) -> bool:
+        """Queue a native balloon without calling Shell APIs from the caller thread."""
+        with self._lifecycle_lock:
+            hwnd = self._hwnd
+            running = self._running
+        if not running or not hwnd:
+            return False
+        try:
+            self._notification_queue.put_nowait(
+                (str(title)[:63], str(message)[:255], bool(warning))
+            )
+        except queue.Full:
+            return False
+        post_message = ctypes.windll.user32.PostMessageW
+        post_message.argtypes = (
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        )
+        post_message.restype = wintypes.BOOL
+        return bool(post_message(hwnd, 0x8002, 0, 0))
+
     def _run(self) -> None:
         try:
             self._run_windows()
@@ -166,6 +193,7 @@ class WindowsTrayIcon:
 
         WM_APP = 0x8000
         WM_TRAYICON = WM_APP + 1
+        WM_SHOW_NOTIFICATION = WM_APP + 2
         WM_CLOSE = 0x0010
         WM_DESTROY = 0x0002
         WM_COMMAND = 0x0111
@@ -176,11 +204,15 @@ class WindowsTrayIcon:
         LR_LOADFROMFILE = 0x0010
         LR_DEFAULTSIZE = 0x0040
         NIM_ADD = 0x00000000
+        NIM_MODIFY = 0x00000001
         NIM_DELETE = 0x00000002
         NIM_SETVERSION = 0x00000004
         NIF_MESSAGE = 0x00000001
         NIF_ICON = 0x00000002
         NIF_TIP = 0x00000004
+        NIF_INFO = 0x00000010
+        NIIF_INFO = 0x00000001
+        NIIF_WARNING = 0x00000002
         NOTIFYICON_VERSION_4 = 4
 
         LRESULT = ctypes.c_ssize_t
@@ -301,6 +333,17 @@ class WindowsTrayIcon:
                 if mouse_message in (WM_RBUTTONUP, WM_CONTEXTMENU):
                     self._show_menu(hwnd, user32)
                     return 0
+            if message == WM_SHOW_NOTIFICATION:
+                try:
+                    title, body, warning = self._notification_queue.get_nowait()
+                except queue.Empty:
+                    return 0
+                notify_data.uFlags = NIF_INFO
+                notify_data.szInfoTitle = title
+                notify_data.szInfo = body
+                notify_data.dwInfoFlags = NIIF_WARNING if warning else NIIF_INFO
+                shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(notify_data))
+                return 0
             if message == WM_COMMAND:
                 action = TRAY_MENU_ACTIONS.get(int(wparam) & 0xFFFF)
                 if action:
@@ -396,8 +439,9 @@ class WindowsTrayIcon:
             add_item(1003, "Start Auto Refresh", states[TRAY_ACTION_START_AUTO])
             add_item(1004, "Stop Auto Refresh", states[TRAY_ACTION_STOP_AUTO])
             add_item(1005, "Event History")
+            add_item(1006, "Notification Settings")
             user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-            add_item(1006, "Exit")
+            add_item(1007, "Exit")
 
             point = wintypes.POINT()
             user32.GetCursorPos(ctypes.byref(point))

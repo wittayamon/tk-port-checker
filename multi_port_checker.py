@@ -28,11 +28,28 @@ from monitoring_state import (
     make_host_record,
     normalize_host_record,
 )
+from notification_manager import NotificationManager
+from notification_models import (
+    DeliveryResult,
+    NotificationEvent,
+    NotificationSettings,
+    PROVIDER_GENERIC,
+    PROVIDER_TEAMS,
+    PROVIDER_WINDOWS,
+    notification_settings_from_config,
+)
+from webhook_notifications import (
+    GenericWebhookProvider,
+    TeamsWebhookProvider,
+    endpoint_is_valid,
+)
+from windows_notifications import WindowsNotificationProvider
 from windows_tray import (
     ShutdownGuard,
     TRAY_ACTION_CHECK_ALL,
     TRAY_ACTION_EVENT_HISTORY,
     TRAY_ACTION_EXIT,
+    TRAY_ACTION_NOTIFICATION_SETTINGS,
     TRAY_ACTION_OPEN,
     TRAY_ACTION_START_AUTO,
     TRAY_ACTION_STOP_AUTO,
@@ -61,8 +78,14 @@ network_executor = ThreadPoolExecutor(max_workers=CHECK_WORKERS, thread_name_pre
 trace_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="trace-route")
 trace_windows = set()
 event_history_windows = set()
+notification_settings_windows = set()
 tcp_state_tracker = TcpStateTracker()
 event_history_store = None
+notification_settings = NotificationSettings()
+notification_manager = None
+notification_result_queue = queue.Queue()
+notification_poll_after_id = None
+notification_last_results = {}
 tray_action_queue = queue.Queue()
 tray_icon = None
 tray_poll_after_id = None
@@ -368,6 +391,21 @@ def persist_state_change_events(alerts):
         refresh_event_history_windows()
 
 
+def enqueue_state_change_notifications(alerts):
+    """Convert canonical TCP transitions into provider delivery jobs once."""
+    if not alerts or notification_manager is None:
+        return
+    for alert in alerts:
+        event = NotificationEvent.from_state_change(
+            alert["event"],
+            device_name=alert["name"],
+            host=alert["host"],
+            port=alert["port"],
+            ping=alert["ping"],
+        )
+        notification_manager.enqueue(event)
+
+
 def finish_check_cycle():
     global check_in_progress, active_checks
     check_in_progress = False
@@ -394,6 +432,7 @@ def poll_check_cycle():
         if alert is not None:
             alerts.append(alert)
     persist_state_change_events(alerts)
+    enqueue_state_change_notifications(alerts)
     show_state_change_alerts(alerts)
     finish_check_cycle()
 
@@ -1096,6 +1135,386 @@ def open_event_history():
     return EventHistoryWindow(root)
 
 
+# ===================== Notification providers/settings =====================
+
+def _native_notification_callback(title: str, message: str, warning: bool) -> bool:
+    if tray_icon is None:
+        return False
+    return tray_icon.show_notification(title, message, warning)
+
+
+def build_notification_providers(settings: NotificationSettings) -> dict:
+    return {
+        PROVIDER_WINDOWS: WindowsNotificationProvider(
+            _native_notification_callback
+        ),
+        PROVIDER_GENERIC: GenericWebhookProvider(settings.generic_webhook_url),
+        PROVIDER_TEAMS: TeamsWebhookProvider(settings.teams_webhook_url),
+    }
+
+
+def apply_notification_settings(settings: NotificationSettings, *, persist=False):
+    global notification_settings
+    notification_settings = settings
+    if notification_manager is not None:
+        notification_manager.configure(
+            notification_settings,
+            build_notification_providers(notification_settings),
+        )
+    if persist:
+        save_config()
+
+
+def start_notification_support() -> None:
+    global notification_manager, notification_poll_after_id
+    notification_manager = NotificationManager(notification_result_queue.put)
+    apply_notification_settings(notification_settings)
+    notification_poll_after_id = root.after(100, poll_notification_results)
+
+
+def poll_notification_results() -> None:
+    global notification_poll_after_id
+    notification_poll_after_id = None
+    if shutdown_guard.started:
+        return
+    try:
+        while True:
+            result = notification_result_queue.get_nowait()
+            notification_last_results[result.provider] = result
+            for settings_window in tuple(notification_settings_windows):
+                settings_window.handle_delivery_result(result)
+    except queue.Empty:
+        pass
+    notification_poll_after_id = root.after(100, poll_notification_results)
+
+
+class NotificationSettingsWindow:
+    """Configure providers without exposing endpoints outside a masked entry."""
+
+    def __init__(self, parent):
+        self.window = tk.Toplevel(parent)
+        apply_window_icon(self.window)
+        self.window.title("Notification Settings")
+        self.window.geometry("720x500")
+        self.window.resizable(False, False)
+        self._closed = False
+
+        self.windows_enabled = tk.BooleanVar(
+            value=notification_settings.windows_notifications_enabled
+        )
+        self.generic_enabled = tk.BooleanVar(
+            value=notification_settings.generic_webhook_enabled
+        )
+        self.generic_url = tk.StringVar(
+            value=notification_settings.generic_webhook_url
+        )
+        self.teams_enabled = tk.BooleanVar(
+            value=notification_settings.teams_webhook_enabled
+        )
+        self.teams_url = tk.StringVar(value=notification_settings.teams_webhook_url)
+        self.timeout_var = tk.StringVar(value=str(notification_settings.timeout_seconds))
+        self.retries_var = tk.StringVar(value=str(notification_settings.retry_count))
+        self.show_urls = tk.BooleanVar(value=False)
+        self.status_var = tk.StringVar(value="Ready")
+
+        self.intro_label = tk.Label(
+            self.window,
+            text=(
+                "Notifications use TCP DOWN / RECOVERED transitions. "
+                "Webhook endpoints are sensitive local settings."
+            ),
+            anchor="w",
+        )
+        self.intro_label.pack(fill="x", padx=12, pady=(12, 6))
+
+        self.windows_frame = tk.LabelFrame(self.window, text="Windows Notification")
+        self.windows_frame.pack(fill="x", padx=12, pady=5)
+        self.windows_check = tk.Checkbutton(
+            self.windows_frame, text="Enabled", variable=self.windows_enabled
+        )
+        self.windows_check.grid(row=0, column=0, padx=8, pady=8, sticky="w")
+        self.windows_test = tk.Button(
+            self.windows_frame,
+            text="Test",
+            width=10,
+            command=lambda: self.test_provider(PROVIDER_WINDOWS),
+        )
+        self.windows_test.grid(row=0, column=2, padx=8, pady=8, sticky="e")
+        self.windows_frame.grid_columnconfigure(1, weight=1)
+
+        self.generic_frame = tk.LabelFrame(self.window, text="Generic Webhook")
+        self.generic_frame.pack(fill="x", padx=12, pady=5)
+        self.generic_check = tk.Checkbutton(
+            self.generic_frame, text="Enabled", variable=self.generic_enabled
+        )
+        self.generic_check.grid(row=0, column=0, padx=8, pady=8, sticky="w")
+        self.generic_label = tk.Label(self.generic_frame, text="Webhook URL:")
+        self.generic_label.grid(row=0, column=1, padx=(4, 4), pady=8)
+        self.generic_entry = tk.Entry(
+            self.generic_frame,
+            textvariable=self.generic_url,
+            width=48,
+            show="•",
+        )
+        self.generic_entry.grid(row=0, column=2, padx=4, pady=8, sticky="ew")
+        self.generic_test = tk.Button(
+            self.generic_frame,
+            text="Test",
+            width=10,
+            command=lambda: self.test_provider(PROVIDER_GENERIC),
+        )
+        self.generic_test.grid(row=0, column=3, padx=8, pady=8)
+        self.generic_frame.grid_columnconfigure(2, weight=1)
+
+        self.teams_frame = tk.LabelFrame(self.window, text="Microsoft Teams")
+        self.teams_frame.pack(fill="x", padx=12, pady=5)
+        self.teams_check = tk.Checkbutton(
+            self.teams_frame, text="Enabled", variable=self.teams_enabled
+        )
+        self.teams_check.grid(row=0, column=0, padx=8, pady=8, sticky="w")
+        self.teams_label = tk.Label(self.teams_frame, text="Workflow URL:")
+        self.teams_label.grid(row=0, column=1, padx=(4, 4), pady=8)
+        self.teams_entry = tk.Entry(
+            self.teams_frame,
+            textvariable=self.teams_url,
+            width=48,
+            show="•",
+        )
+        self.teams_entry.grid(row=0, column=2, padx=4, pady=8, sticky="ew")
+        self.teams_test = tk.Button(
+            self.teams_frame,
+            text="Test",
+            width=10,
+            command=lambda: self.test_provider(PROVIDER_TEAMS),
+        )
+        self.teams_test.grid(row=0, column=3, padx=8, pady=8)
+        self.teams_frame.grid_columnconfigure(2, weight=1)
+
+        self.delivery_frame = tk.LabelFrame(self.window, text="Delivery")
+        self.delivery_frame.pack(fill="x", padx=12, pady=5)
+        self.timeout_label = tk.Label(self.delivery_frame, text="Timeout (1–30 sec):")
+        self.timeout_label.grid(row=0, column=0, padx=(8, 4), pady=8)
+        self.timeout_entry = tk.Entry(
+            self.delivery_frame, textvariable=self.timeout_var, width=6
+        )
+        self.timeout_entry.grid(row=0, column=1, padx=(0, 16), pady=8)
+        self.retries_label = tk.Label(self.delivery_frame, text="Retries (0–5):")
+        self.retries_label.grid(row=0, column=2, padx=(0, 4), pady=8)
+        self.retries_entry = tk.Entry(
+            self.delivery_frame, textvariable=self.retries_var, width=6
+        )
+        self.retries_entry.grid(row=0, column=3, padx=(0, 16), pady=8)
+        self.show_check = tk.Checkbutton(
+            self.delivery_frame,
+            text="Show webhook URLs",
+            variable=self.show_urls,
+            command=self.toggle_url_visibility,
+        )
+        self.show_check.grid(row=0, column=4, padx=8, pady=8)
+
+        self.status_label = tk.Label(
+            self.window, textvariable=self.status_var, anchor="w", wraplength=690
+        )
+        self.status_label.pack(fill="x", padx=12, pady=(6, 4))
+        self.button_frame = tk.Frame(self.window)
+        self.button_frame.pack(pady=8)
+        self.save_button = tk.Button(
+            self.button_frame, text="Save", width=12, command=self.save
+        )
+        self.save_button.grid(row=0, column=0, padx=5)
+        self.cancel_button = tk.Button(
+            self.button_frame, text="Cancel", width=12, command=self.close
+        )
+        self.cancel_button.grid(row=0, column=1, padx=5)
+
+        notification_settings_windows.add(self)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.apply_theme(current_theme)
+        self.show_last_result()
+
+    def toggle_url_visibility(self):
+        mask = "" if self.show_urls.get() else "•"
+        self.generic_entry.configure(show=mask)
+        self.teams_entry.configure(show=mask)
+
+    def parsed_delivery_policy(self):
+        try:
+            timeout = int(self.timeout_var.get())
+            retries = int(self.retries_var.get())
+        except ValueError:
+            raise ValueError("Timeout and Retries must be whole numbers.")
+        if not 1 <= timeout <= 30:
+            raise ValueError("Timeout must be between 1 and 30 seconds.")
+        if not 0 <= retries <= 5:
+            raise ValueError("Retries must be between 0 and 5.")
+        return timeout, retries
+
+    def settings_from_form(self) -> NotificationSettings:
+        timeout, retries = self.parsed_delivery_policy()
+        generic_url = self.generic_url.get().strip()
+        teams_url = self.teams_url.get().strip()
+        if self.generic_enabled.get() and not endpoint_is_valid(generic_url):
+            raise ValueError("Generic Webhook requires a valid HTTP(S) URL.")
+        if self.teams_enabled.get() and not endpoint_is_valid(teams_url):
+            raise ValueError("Microsoft Teams requires a valid HTTP(S) URL.")
+        return NotificationSettings(
+            windows_notifications_enabled=bool(self.windows_enabled.get()),
+            generic_webhook_enabled=bool(self.generic_enabled.get()),
+            generic_webhook_url=generic_url,
+            teams_webhook_enabled=bool(self.teams_enabled.get()),
+            teams_webhook_url=teams_url,
+            timeout_seconds=timeout,
+            retry_count=retries,
+        )
+
+    def save(self):
+        try:
+            settings = self.settings_from_form()
+        except ValueError as exc:
+            messagebox.showerror("Notification Settings", str(exc), parent=self.window)
+            return
+        apply_notification_settings(settings, persist=True)
+        self.status_var.set("Notification settings saved.")
+        self.close()
+
+    def test_provider(self, provider_key: str):
+        if notification_manager is None:
+            self.status_var.set("Notification service is unavailable.")
+            return
+        try:
+            timeout, retries = self.parsed_delivery_policy()
+        except ValueError as exc:
+            messagebox.showerror("Test Notification", str(exc), parent=self.window)
+            return
+        if provider_key == PROVIDER_WINDOWS:
+            provider = WindowsNotificationProvider(_native_notification_callback)
+        elif provider_key == PROVIDER_GENERIC:
+            endpoint = self.generic_url.get().strip()
+            if not endpoint_is_valid(endpoint):
+                messagebox.showerror(
+                    "Test Notification",
+                    "Generic Webhook requires a valid HTTP(S) URL.",
+                    parent=self.window,
+                )
+                return
+            provider = GenericWebhookProvider(endpoint)
+        else:
+            endpoint = self.teams_url.get().strip()
+            if not endpoint_is_valid(endpoint):
+                messagebox.showerror(
+                    "Test Notification",
+                    "Microsoft Teams requires a valid HTTP(S) URL.",
+                    parent=self.window,
+                )
+                return
+            provider = TeamsWebhookProvider(endpoint)
+        if notification_manager.enqueue_test(
+            provider, timeout=timeout, retries=retries
+        ):
+            self.status_var.set(f"Testing {provider.display_name}…")
+        else:
+            self.status_var.set("Unable to queue the test notification.")
+
+    def show_last_result(self):
+        if not notification_last_results:
+            return
+        result = next(reversed(notification_last_results.values()))
+        self.status_var.set(result.message)
+
+    def handle_delivery_result(self, result: DeliveryResult):
+        if self._closed:
+            return
+        self.status_var.set(result.message)
+        if result.test_only:
+            dialog = messagebox.showinfo if result.success else messagebox.showerror
+            dialog("Test Notification", result.message, parent=self.window)
+
+    def apply_theme(self, theme: str):
+        if self._closed:
+            return
+        palette = get_theme_palette(theme)
+        self.window.configure(bg=palette["bg"])
+        for frame in (
+            self.windows_frame,
+            self.generic_frame,
+            self.teams_frame,
+            self.delivery_frame,
+        ):
+            frame.configure(bg=palette["bg"], fg=palette["fg"])
+        self.button_frame.configure(bg=palette["bg"])
+        for label in (
+            self.intro_label,
+            self.generic_label,
+            self.teams_label,
+            self.timeout_label,
+            self.retries_label,
+            self.status_label,
+        ):
+            label.configure(bg=palette["bg"], fg=palette["fg"])
+        for check in (
+            self.windows_check,
+            self.generic_check,
+            self.teams_check,
+            self.show_check,
+        ):
+            check.configure(
+                bg=palette["bg"],
+                fg=palette["fg"],
+                selectcolor=palette["entry_bg"],
+                activebackground=palette["bg"],
+                activeforeground=palette["fg"],
+            )
+        for entry in (
+            self.generic_entry,
+            self.teams_entry,
+            self.timeout_entry,
+            self.retries_entry,
+        ):
+            entry.configure(
+                bg=palette["entry_bg"],
+                fg=palette["entry_fg"],
+                insertbackground=palette["entry_fg"],
+            )
+        for button in (
+            self.windows_test,
+            self.generic_test,
+            self.teams_test,
+            self.save_button,
+            self.cancel_button,
+        ):
+            button.configure(
+                bg=palette["button_bg"],
+                fg=palette["fg"],
+                activebackground=palette["button_bg"],
+                activeforeground=palette["fg"],
+            )
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        notification_settings_windows.discard(self)
+        try:
+            self.window.destroy()
+        except tk.TclError:
+            pass
+
+
+def open_notification_settings():
+    for settings_window in tuple(notification_settings_windows):
+        if settings_window._closed:
+            notification_settings_windows.discard(settings_window)
+            continue
+        try:
+            settings_window.window.deiconify()
+            settings_window.window.lift()
+            settings_window.window.focus_force()
+            return settings_window
+        except tk.TclError:
+            notification_settings_windows.discard(settings_window)
+    return NotificationSettingsWindow(root)
+
+
 # ===================== IPv4 Range Scan =====================
 
 def set_scan_controls(running: bool):
@@ -1330,6 +1749,7 @@ def save_config():
         "close_to_tray": bool(close_to_tray_var.get()),
         "hosts": hosts,
     }
+    config.update(notification_settings.to_config())
 
     try:
         with open(get_config_path(), "w", encoding="utf-8") as f:
@@ -1341,7 +1761,7 @@ def save_config():
 
 def load_config():
     """อ่าน config ถ้ามี แล้ว set theme + เติม host list ให้"""
-    global current_theme
+    global current_theme, notification_settings
     path = get_config_path()
     if not os.path.exists(path):
         return
@@ -1366,6 +1786,7 @@ def load_config():
     tray_preferences = tray_preferences_from_config(config)
     minimize_to_tray_var.set(tray_preferences.minimize_to_tray)
     close_to_tray_var.set(tray_preferences.close_to_tray)
+    notification_settings = notification_settings_from_config(config)
 
     # hosts
     hosts = config.get("hosts", [])
@@ -1484,6 +1905,9 @@ def handle_tray_action(action: str) -> None:
     elif action == TRAY_ACTION_EVENT_HISTORY:
         restore_main_window()
         open_event_history()
+    elif action == TRAY_ACTION_NOTIFICATION_SETTINGS:
+        restore_main_window()
+        open_notification_settings()
     elif action == TRAY_ACTION_EXIT:
         shutdown_application()
 
@@ -1513,7 +1937,8 @@ def on_close() -> None:
 
 def shutdown_application() -> bool:
     """Idempotent canonical cleanup used by every real Exit action."""
-    global auto_running, tray_poll_after_id, tray_available, main_window_hidden
+    global auto_running, tray_poll_after_id, notification_poll_after_id
+    global tray_available, main_window_hidden
     if not shutdown_guard.begin():
         return False
 
@@ -1530,6 +1955,14 @@ def shutdown_application() -> bool:
         except tk.TclError:
             pass
         tray_poll_after_id = None
+    if notification_poll_after_id is not None:
+        try:
+            root.after_cancel(notification_poll_after_id)
+        except tk.TclError:
+            pass
+        notification_poll_after_id = None
+    if notification_manager is not None:
+        notification_manager.shutdown(timeout=1.0)
     if scan_running and scan_plan is not None:
         scan_plan.cancel()
         for future in tuple(scan_pending):
@@ -1538,6 +1971,8 @@ def shutdown_application() -> bool:
         trace_window.close()
     for history_window in tuple(event_history_windows):
         history_window.close()
+    for settings_window in tuple(notification_settings_windows):
+        settings_window.close()
     save_config()
     if tray_icon is not None:
         tray_icon.stop()
@@ -1732,6 +2167,7 @@ def apply_theme(theme: str):
         btn_scan,
         btn_cancel_scan,
         btn_hide_tray,
+        btn_notifications,
     ):
         btn.configure(bg=button_bg, fg=fg, activebackground=button_bg, activeforeground=fg)
 
@@ -1761,13 +2197,15 @@ def apply_theme(theme: str):
         trace_window.apply_theme(theme)
     for history_window in tuple(event_history_windows):
         history_window.apply_theme(theme)
+    for settings_window in tuple(notification_settings_windows):
+        settings_window.apply_theme(theme)
 
 
 # ===================== GUI =====================
 
 root = tk.Tk()
 root.title("Multi Host Port Checker (with Ping)")
-root.geometry("1050x650")
+root.geometry("1050x700")
 root.resizable(False, False)
 apply_window_icon(root)
 
@@ -1953,6 +2391,14 @@ chk_close_tray.grid(
     row=3, column=2, columnspan=2, padx=5, pady=(10, 0), sticky="w"
 )
 
+btn_notifications = tk.Button(
+    frame_bottom,
+    text="Notification Settings",
+    width=20,
+    command=open_notification_settings,
+)
+btn_notifications.grid(row=4, column=0, columnspan=2, padx=5, pady=(10, 0))
+
 # โหลด config (theme + hosts) ก่อน apply_theme
 load_config()
 apply_theme(current_theme)
@@ -1961,5 +2407,6 @@ apply_theme(current_theme)
 root.protocol("WM_DELETE_WINDOW", on_close)
 root.bind("<Unmap>", handle_root_unmap, add="+")
 start_tray_support()
+start_notification_support()
 
 root.mainloop()

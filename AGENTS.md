@@ -20,6 +20,7 @@ Main capabilities currently include:
 - TCP State Change Alerts with downtime tracking
 - Persistent Event History with filtering, CSV Export, and retention
 - Native Windows System Tray with background monitoring controls
+- Provider-based Windows, Generic Webhook, and Microsoft Teams-compatible notifications
 - Save / Load host lists
 - Auto-load saved hosts
 - Dark / Light theme
@@ -27,9 +28,9 @@ Main capabilities currently include:
 - PyInstaller EXE build support
 - Custom application icon
 
-Current release version: **v1.5.0**
+Current release version: **v1.6.0**
 
-Current recommended version for Windows System Tray work: **v1.6.0**
+Current recommended version for Notification Framework work: **v1.7.0**
 
 ---
 
@@ -70,7 +71,7 @@ Before modifying the project:
 
 Keep the current release-oriented structure unless a task explicitly authorizes a larger migration:
 
-- Application modules remain at repository root: `multi_port_checker.py`, `network_checks.py`, `monitoring_state.py`, `event_history.py`, and `windows_tray.py`
+- Application modules remain at repository root: `multi_port_checker.py`, `network_checks.py`, `monitoring_state.py`, `event_history.py`, `windows_tray.py`, `notification_models.py`, `notification_manager.py`, `windows_notifications.py`, and `webhook_notifications.py`
 - Unit tests live under `tests/`
 - Static application assets live under `assets/`
 - Future sanitized documentation images belong under `docs/images/`
@@ -83,7 +84,7 @@ Canonical verification commands from repository root are:
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py windows_tray.py tests
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 pyinstaller --clean --noconfirm MultiPortChecker.spec
 ```
 
@@ -265,12 +266,32 @@ System Tray changes must preserve these invariants:
 - Only one tray icon and one native tray message loop may exist per application instance
 - Only the existing Auto Refresh scheduling path may be used; tray commands must not create a second timer or executor
 - Tray Open must restore the existing Tk root, never create another root
-- Tray Check All, Start Auto Refresh, Stop Auto Refresh, and Event History must reuse the existing application actions
+- Tray Check All, Start Auto Refresh, Stop Auto Refresh, Event History, and Notification Settings must reuse the existing application actions
 - Tray Exit and every other real-exit path must converge on the canonical idempotent application shutdown
 - Shutdown must remove the tray icon/message loop and preserve existing executor, Trace Route, Event History, and Tk cleanup behavior
 - The Windows tray implementation must remain compatible with the tracked `MultiPortChecker.spec` and shared icon under `assets/`
 - Do not add `pystray`, Pillow, pywin32, or another runtime dependency without explicit user approval and a concrete maintainability justification
 - Update both `README.md` and `README_TH.md` for tray behavior changes, and keep all examples compliant with the mandatory public-repository safety rules
+
+---
+
+## Notification Framework Architecture
+
+Notification changes must preserve these invariants:
+
+- `TcpStateTracker` is the single canonical source of meaningful TCP state transitions; providers must never implement separate monitoring or transition logic
+- Event History and provider notifications must consume the same canonical DOWN / RECOVERED transition without duplicating it
+- Network notification delivery must run outside Tk's main thread on a bounded worker or queue
+- Provider errors, timeouts, and retries must never break monitoring, Auto Refresh, Event History, or another provider
+- Tray callbacks, notification results, and Settings UI updates must marshal to Tk through the existing main-thread dispatch path
+- Webhook and Workflow endpoint URLs are sensitive; never print, log, export, commit, or expose full endpoints or their tokens in diagnostics
+- External webhook providers must default to disabled for old and new configurations
+- Tests must use mocks, fakes, or temporary localhost servers and must never call real external notification services
+- Test Notification actions must not modify `TcpStateTracker`, Event History, or monitored target state
+- Canonical application shutdown must stop accepting notification work, cancel pending retries where practical, and stop the notification worker without waiting indefinitely
+- Do not add third-party notification or HTTP dependencies without explicit user approval and a concrete maintainability justification
+- Keep `README.md` and `README_TH.md` synchronized for all notification behavior, configuration, security, and provider changes
+- Public-repository documentation safety remains mandatory for provider examples, payloads, tests, comments, and release notes
 
 ---
 

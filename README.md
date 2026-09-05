@@ -38,6 +38,8 @@ The Ping and TCP results are independent: a host can respond to Ping while its c
 - Dark and Light themes
 - Native Windows System Tray with background monitoring controls
 - Optional Minimize-to-Tray and persisted Close-to-Tray behavior
+- Provider-based notifications for Windows, Generic Webhooks, and Microsoft Teams-compatible endpoints
+- Background notification delivery with configurable timeout and retries
 - PyInstaller-compatible icon and resource handling
 
 ## Device Names and target data
@@ -120,7 +122,7 @@ Ping remains diagnostic information. A Ping `Timeout` does not cause a DOWN aler
 
 The native Windows notification-area icon starts with the application without any third-party runtime dependency. Startup still shows the normal main window; the application does not start hidden.
 
-The tray menu provides **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History**, and **Exit**. These actions reuse the existing monitoring and Auto Refresh paths, so only one check cycle and one Auto Refresh timer can run. **Event History** restores the application and opens or focuses the existing history window.
+The tray menu provides **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History**, **Notification Settings**, and **Exit**. These actions reuse the existing monitoring and Auto Refresh paths, so only one check cycle and one Auto Refresh timer can run. **Event History** and **Notification Settings** restore the application and open or focus the existing window.
 
 - **Hide to Tray** explicitly hides the main window while monitoring continues.
 - **Minimize to tray** optionally converts normal minimization into hiding. It is disabled by default.
@@ -131,6 +133,31 @@ The tray menu provides **Open MultiPortChecker**, **Check All**, **Start Auto Re
 - Use the tray menu's **Exit** command for a guaranteed full shutdown of the tray icon, monitoring executors, Trace Route processes, Event History windows, and Tk application.
 
 If the Windows tray icon cannot be initialized, Hide to Tray is disabled and the main-window X exits normally.
+
+## Notification Framework
+
+Choose **Notification Settings** in the main window or System Tray to configure independent delivery providers:
+
+- **Windows Notifications** use the existing native notification-area icon and Windows Shell APIs. No third-party notification package is required.
+- **Generic Webhook** sends an HTTP `POST` with a UTF-8 JSON payload suitable for automation.
+- **Microsoft Teams** sends an Adaptive Card payload to a user-configured Teams-compatible webhook or Workflow endpoint. Availability depends on the endpoint configured by the user; no legacy connector model is assumed.
+
+All providers are disabled by default, so upgrading does not send external notifications unexpectedly. Windows Notifications are separate from the existing **State Change Alerts** checkbox: users can enable dialogs, Windows notifications, both, or neither. Event History remains active independently of notification settings.
+
+Notifications use the same canonical TCP transitions as alerts and Event History:
+
+- `ONLINE -> OFFLINE` sends one **DOWN** notification.
+- `OFFLINE -> ONLINE` sends one **RECOVERED** notification with downtime.
+- Initial `UNKNOWN` baselines, repeated states, Ping-only changes, Trace Route results, and transient IP Range Scan discoveries do not notify.
+- A promoted persistent scan target may notify only after its normal baseline is established.
+
+External delivery uses one bounded background worker, so HTTP requests never block Tkinter, monitoring, or Event History. Each actual device transition is delivered separately. One provider failure does not stop other providers. HTTP success requires a `2xx` response; failures use a 5-second timeout and two retries by default, delayed by 1 and 3 seconds. Settings accept timeouts from 1–30 seconds and retries from 0–5. Automatic failures update the concise last-result status in Notification Settings without opening repeated modal dialogs.
+
+Each provider has a **Test** button. Test notifications use the fictional `Demo-Device` identity, run in the background, and never change `TcpStateTracker` or Event History. Test results return to the Tk main thread and show a concise success or failure message without revealing an endpoint URL.
+
+Webhook URLs may contain secret tokens. They are masked in Notification Settings with an explicit **Show webhook URLs** control and are never included in history, CSV exports, or delivery diagnostics. URLs are stored locally as sensitive plain text in the ignored `mpc_config.json`; protect access to that file. No custom or misleading encryption is used.
+
+When the application is hidden, Event History and external notifications are processed immediately. Existing Tk alert dialogs remain deferred until the main window is restored.
 
 ## Event History
 
@@ -195,6 +222,10 @@ network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
 event_history.py            SQLite Event History and CSV export helpers
 windows_tray.py             Native Windows notification-area integration
+notification_models.py      Notification events and backward-compatible settings
+notification_manager.py     Bounded background delivery and retry coordinator
+windows_notifications.py   Native Windows notification provider
+webhook_notifications.py   Generic and Teams-compatible webhook providers
 assets/
   icon_network_transparent.ico
 tests/
@@ -204,6 +235,9 @@ tests/
   test_monitoring_state.py    Device-record, transition, and duration tests
   test_event_history.py       Event storage, filtering, retention, and CSV tests
   test_tray_helpers.py        Tray preferences, actions, and lifecycle tests
+  test_notification_manager.py Notification settings, transitions, queue, and shutdown tests
+  test_webhook_notifications.py Local HTTP delivery and payload tests
+  test_windows_notifications.py Native notification formatting/provider tests
 MultiPortChecker.spec       PyInstaller build configuration
 README.md
 README_TH.md
@@ -216,10 +250,9 @@ Future documentation screenshots must use sanitized fictional data and belong un
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py windows_tray.py tests
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 ```
 
 ## Roadmap
 
-- Windows toast/webhook notifications
 - Optional Event History date-range filtering

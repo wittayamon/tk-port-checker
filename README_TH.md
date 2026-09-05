@@ -38,6 +38,8 @@
 - Theme แบบ Dark และ Light
 - Windows System Tray แบบ native พร้อมตัวควบคุมการเฝ้าติดตามเบื้องหลัง
 - Minimize-to-Tray แบบเลือกได้และ Close-to-Tray ที่บันทึกการตั้งค่า
+- ระบบ Notification แบบ provider สำหรับ Windows, Generic Webhook และ endpoint ที่รองรับ Microsoft Teams
+- ส่ง Notification เบื้องหลังพร้อมกำหนด timeout และ retry ได้
 - การจัดการ icon และ resource ที่รองรับ PyInstaller
 
 ## Device Name และข้อมูลเป้าหมาย
@@ -120,7 +122,7 @@ Ping ยังคงเป็นข้อมูลสำหรับวินิ
 
 ไอคอน notification area แบบ native ของ Windows จะเริ่มพร้อมแอปโดยไม่ใช้ runtime dependency ภายนอก เมื่อเริ่มโปรแกรม หน้าต่างหลักจะยังแสดงตามปกติและแอปจะไม่เริ่มแบบซ่อน
 
-เมนู tray มี **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History** และ **Exit** คำสั่งเหล่านี้ใช้เส้นทางการเฝ้าติดตามและ Auto Refresh เดิม จึงมีรอบตรวจสอบและ Auto Refresh timer เพียงชุดเดียว **Event History** จะคืนหน้าต่างหลักและเปิดหรือโฟกัสหน้าต่างประวัติที่มีอยู่
+เมนู tray มี **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History**, **Notification Settings** และ **Exit** คำสั่งเหล่านี้ใช้เส้นทางการเฝ้าติดตามและ Auto Refresh เดิม จึงมีรอบตรวจสอบและ Auto Refresh timer เพียงชุดเดียว **Event History** และ **Notification Settings** จะคืนหน้าต่างหลักและเปิดหรือโฟกัสหน้าต่างที่มีอยู่
 
 - **Hide to Tray** ซ่อนหน้าต่างหลักโดยตั้งใจ ขณะที่การเฝ้าติดตามยังทำงานต่อ
 - **Minimize to tray** เลือกให้การ minimize ปกติเปลี่ยนเป็นการซ่อนได้ โดยค่าเริ่มต้นปิดอยู่
@@ -131,6 +133,31 @@ Ping ยังคงเป็นข้อมูลสำหรับวินิ
 - ใช้คำสั่ง **Exit** ในเมนู tray เพื่อปิด tray icon, monitoring executor, กระบวนการ Trace Route, หน้าต่าง Event History และแอป Tk อย่างสมบูรณ์
 
 หากเริ่มไอคอน Windows tray ไม่สำเร็จ ปุ่ม Hide to Tray จะถูกปิดใช้งานและปุ่ม X ของหน้าต่างหลักจะออกจากโปรแกรมตามปกติ
+
+## Notification Framework
+
+เลือก **Notification Settings** ในหน้าต่างหลักหรือ System Tray เพื่อกำหนด provider ที่ทำงานแยกจากกัน:
+
+- **Windows Notifications** ใช้ไอคอน notification area แบบ native ที่มีอยู่และ Windows Shell APIs โดยไม่ต้องใช้แพ็กเกจ Notification ภายนอก
+- **Generic Webhook** ส่ง HTTP `POST` พร้อม payload JSON แบบ UTF-8 สำหรับงาน automation
+- **Microsoft Teams** ส่ง payload แบบ Adaptive Card ไปยัง webhook หรือ Workflow endpoint ที่รองรับ Teams ซึ่งผู้ใช้กำหนดเอง การใช้งานขึ้นอยู่กับ endpoint ที่ตั้งค่าไว้และไม่ได้สมมติว่า legacy connector แบบใดพร้อมใช้งานเสมอ
+
+provider ทั้งหมดปิดโดยค่าเริ่มต้น การอัปเกรดจึงไม่ส่ง Notification ภายนอกโดยไม่คาดคิด Windows Notifications แยกจาก checkbox **State Change Alerts** เดิม ผู้ใช้สามารถเปิด dialog, Windows notification, ทั้งสองอย่าง หรือปิดทั้งหมดได้ Event History ยังคงทำงานเป็นอิสระจากการตั้งค่า Notification
+
+Notification ใช้ TCP transition หลักชุดเดียวกับ alert และ Event History:
+
+- `ONLINE -> OFFLINE` ส่ง Notification **DOWN** หนึ่งครั้ง
+- `OFFLINE -> ONLINE` ส่ง Notification **RECOVERED** หนึ่งครั้งพร้อม downtime
+- baseline เริ่มต้นแบบ `UNKNOWN`, สถานะซ้ำ, การเปลี่ยนเฉพาะ Ping, ผล Trace Route และเป้าหมายชั่วคราวจาก IP Range Scan จะไม่ส่ง Notification
+- เป้าหมายจาก scan ที่ถูกยกระดับเป็นเป้าหมายถาวรจะส่ง Notification ได้หลังจากสร้าง baseline ปกติแล้วเท่านั้น
+
+การส่งภายนอกใช้ background worker แบบ bounded เพียงหนึ่งชุด คำขอ HTTP จึงไม่บล็อก Tkinter, การเฝ้าติดตาม หรือ Event History แต่ละ transition จริงของอุปกรณ์จะถูกส่งแยกกัน ความล้มเหลวของ provider หนึ่งจะไม่หยุด provider อื่น HTTP จะถือว่าสำเร็จเมื่อได้สถานะ `2xx` โดยค่าเริ่มต้นใช้ timeout 5 วินาทีและ retry สองครั้งหลังจากรอ 1 และ 3 วินาที การตั้งค่ารองรับ timeout 1–30 วินาทีและ retry 0–5 ครั้ง ความล้มเหลวอัตโนมัติจะอัปเดตสถานะผลล่าสุดแบบย่อใน Notification Settings โดยไม่เปิด modal dialog ซ้ำ ๆ
+
+แต่ละ provider มีปุ่ม **Test** Test Notification ใช้ชื่อสมมติ `Demo-Device` ทำงานเบื้องหลัง และไม่เปลี่ยน `TcpStateTracker` หรือ Event History ผลการทดสอบจะกลับมายัง Tk main thread และแสดงข้อความสำเร็จหรือล้มเหลวแบบย่อโดยไม่เปิดเผย URL ของ endpoint
+
+Webhook URL อาจมี secret token ช่องข้อมูลจึงถูกปิดบังใน Notification Settings และมีตัวเลือก **Show webhook URLs** สำหรับแสดงอย่างชัดเจน URL จะไม่ถูกใส่ใน history, CSV export หรือข้อความวินิจฉัยการส่ง URL ถูกเก็บเป็น sensitive plain text ภายใน `mpc_config.json` ที่ถูก ignore ในเครื่อง จึงควรป้องกันการเข้าถึงไฟล์นี้ ระบบไม่ใช้การเข้ารหัสแบบกำหนดเองที่ทำให้เข้าใจผิด
+
+เมื่อซ่อนแอป Event History และ Notification ภายนอกจะถูกประมวลผลทันที ส่วน Tk alert dialog เดิมจะยังรอจนกว่าจะคืนหน้าต่างหลัก
 
 ## Event History
 
@@ -195,6 +222,10 @@ network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
 event_history.py            SQLite Event History and CSV export helpers
 windows_tray.py             Native Windows notification-area integration
+notification_models.py      Notification events and backward-compatible settings
+notification_manager.py     Bounded background delivery and retry coordinator
+windows_notifications.py   Native Windows notification provider
+webhook_notifications.py   Generic and Teams-compatible webhook providers
 assets/
   icon_network_transparent.ico
 tests/
@@ -204,6 +235,9 @@ tests/
   test_monitoring_state.py    Device-record, transition, and duration tests
   test_event_history.py       Event storage, filtering, retention, and CSV tests
   test_tray_helpers.py        Tray preferences, actions, and lifecycle tests
+  test_notification_manager.py Notification settings, transitions, queue, and shutdown tests
+  test_webhook_notifications.py Local HTTP delivery and payload tests
+  test_windows_notifications.py Native notification formatting/provider tests
 MultiPortChecker.spec       PyInstaller build configuration
 README.md
 README_TH.md
@@ -216,10 +250,9 @@ Screenshot สำหรับเอกสารในอนาคตต้อง
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py windows_tray.py tests
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 ```
 
 ## แผนงานในอนาคต
 
-- การแจ้งเตือนผ่าน Windows toast/webhook
 - การกรอง Event History ตามช่วงวันที่

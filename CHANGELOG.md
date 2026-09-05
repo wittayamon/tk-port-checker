@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased — recommended v1.7.0
+
+### Added
+
+- Provider-based Notification Framework driven by canonical TCP transitions.
+- Native Windows DOWN / RECOVERED notifications through the existing System Tray icon.
+- Generic HTTP JSON webhook and Microsoft Teams-compatible Adaptive Card providers.
+- Themed Notification Settings window and System Tray entry point.
+- Background Test Notification actions with concise delivery results.
+- Configurable HTTP timeout and retry policy.
+
+### Improved
+
+- Continued external notification delivery while hidden in the System Tray.
+- Isolated provider failures from monitoring, Event History, and other providers.
+- Masked locally stored webhook endpoints and redacted them from diagnostics.
+- Integrated the bounded notification worker into canonical clean shutdown.
+
 ## v1.6.0 - 2026-09-04
 
 ### Added

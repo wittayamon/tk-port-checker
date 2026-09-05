@@ -8,6 +8,7 @@ from windows_tray import (
     TRAY_ACTION_CHECK_ALL,
     TRAY_ACTION_EVENT_HISTORY,
     TRAY_ACTION_EXIT,
+    TRAY_ACTION_NOTIFICATION_SETTINGS,
     TRAY_ACTION_OPEN,
     TRAY_ACTION_START_AUTO,
     TRAY_ACTION_STOP_AUTO,
@@ -87,6 +88,7 @@ class TrayDecisionTests(unittest.TestCase):
                 TRAY_ACTION_START_AUTO,
                 TRAY_ACTION_STOP_AUTO,
                 TRAY_ACTION_EVENT_HISTORY,
+                TRAY_ACTION_NOTIFICATION_SETTINGS,
                 TRAY_ACTION_EXIT,
             },
         )
