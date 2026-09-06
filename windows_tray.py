@@ -16,6 +16,7 @@ TRAY_ACTION_START_AUTO = "start_auto"
 TRAY_ACTION_STOP_AUTO = "stop_auto"
 TRAY_ACTION_EVENT_HISTORY = "event_history"
 TRAY_ACTION_NOTIFICATION_SETTINGS = "notification_settings"
+TRAY_ACTION_NOTIFICATION_HISTORY = "notification_history"
 TRAY_ACTION_EXIT = "exit"
 
 TRAY_MENU_ACTIONS = {
@@ -25,7 +26,8 @@ TRAY_MENU_ACTIONS = {
     1004: TRAY_ACTION_STOP_AUTO,
     1005: TRAY_ACTION_EVENT_HISTORY,
     1006: TRAY_ACTION_NOTIFICATION_SETTINGS,
-    1007: TRAY_ACTION_EXIT,
+    1007: TRAY_ACTION_NOTIFICATION_HISTORY,
+    1008: TRAY_ACTION_EXIT,
 }
 
 
@@ -296,7 +298,20 @@ class WindowsTrayIcon:
         user32.LoadImageW.restype = wintypes.HANDLE
         user32.CreatePopupMenu.restype = wintypes.HMENU
         user32.TrackPopupMenu.restype = wintypes.UINT
+        user32.UnregisterClassW.argtypes = (wintypes.LPCWSTR, wintypes.HINSTANCE)
+        user32.UnregisterClassW.restype = wintypes.BOOL
+        user32.DestroyWindow.argtypes = (wintypes.HWND,)
+        user32.DestroyWindow.restype = wintypes.BOOL
+        user32.IsWindow.argtypes = (wintypes.HWND,)
+        user32.IsWindow.restype = wintypes.BOOL
+        user32.DestroyIcon.argtypes = (wintypes.HICON,)
+        user32.DestroyIcon.restype = wintypes.BOOL
         kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+        shell32.Shell_NotifyIconW.argtypes = (
+            wintypes.DWORD,
+            ctypes.c_void_p,
+        )
+        shell32.Shell_NotifyIconW.restype = wintypes.BOOL
 
         class_name = f"MultiPortCheckerTray_{id(self):x}"
         taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
@@ -440,8 +455,9 @@ class WindowsTrayIcon:
             add_item(1004, "Stop Auto Refresh", states[TRAY_ACTION_STOP_AUTO])
             add_item(1005, "Event History")
             add_item(1006, "Notification Settings")
+            add_item(1007, "Notification History")
             user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-            add_item(1007, "Exit")
+            add_item(1008, "Exit")
 
             point = wintypes.POINT()
             user32.GetCursorPos(ctypes.byref(point))

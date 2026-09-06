@@ -28,9 +28,9 @@ Main capabilities currently include:
 - PyInstaller EXE build support
 - Custom application icon
 
-Current release version: **v1.6.0**
+Current released version: **v1.7.0**
 
-Current recommended version for Notification Framework work: **v1.7.0**
+Current recommended version for Notification Delivery History work: **v1.8.0**
 
 ---
 
@@ -71,7 +71,7 @@ Before modifying the project:
 
 Keep the current release-oriented structure unless a task explicitly authorizes a larger migration:
 
-- Application modules remain at repository root: `multi_port_checker.py`, `network_checks.py`, `monitoring_state.py`, `event_history.py`, `windows_tray.py`, `notification_models.py`, `notification_manager.py`, `windows_notifications.py`, and `webhook_notifications.py`
+- Application modules remain at repository root: `multi_port_checker.py`, `network_checks.py`, `monitoring_state.py`, `event_history.py`, `notification_history.py`, `windows_tray.py`, `notification_models.py`, `notification_manager.py`, `windows_notifications.py`, and `webhook_notifications.py`
 - Unit tests live under `tests/`
 - Static application assets live under `assets/`
 - Future sanitized documentation images belong under `docs/images/`
@@ -84,7 +84,7 @@ Canonical verification commands from repository root are:
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 pyinstaller --clean --noconfirm MultiPortChecker.spec
 ```
 
@@ -292,6 +292,21 @@ Notification changes must preserve these invariants:
 - Do not add third-party notification or HTTP dependencies without explicit user approval and a concrete maintainability justification
 - Keep `README.md` and `README_TH.md` synchronized for all notification behavior, configuration, security, and provider changes
 - Public-repository documentation safety remains mandatory for provider examples, payloads, tests, comments, and release notes
+
+### Notification Delivery History and Durable Retry
+
+- Delivery History must never store endpoint URLs, endpoint paths, query tokens, credentials, Authorization headers, secret request headers, or response bodies
+- Test Notifications must never enter Notification Delivery History or the durable retry queue
+- The durable queue must remain bounded; delayed retries must have a finite schedule and must never run forever
+- Permanent HTTP client/configuration failures such as 400, 401, 403, and 404 must not be automatically retried later
+- Manual Retry must resolve and use the current provider configuration and current endpoint
+- Provider Delivery History is independent from Event History; clearing or retrying deliveries must not add, remove, or modify TCP Event History
+- Startup retry recovery must run outside blocking Tk startup work and feed the bounded notification worker
+- Canonical shutdown must stop retry scheduling promptly and leave persisted retry state recoverable on restart
+- SQLite statements and storage rules belong in the delivery-history module, not Tk-heavy UI code or provider classes
+- Provider failures must remain isolated from monitoring, Event History, the UI, and other providers
+- Public-repository safety remains mandatory for delivery records, tests, documentation, and diagnostics
+- `README.md` and `README_TH.md` must remain synchronized for delivery-history and retry behavior
 
 ---
 

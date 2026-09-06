@@ -7,7 +7,7 @@ from typing import Mapping, Optional
 from monitoring_state import StateChangeEvent, format_duration
 
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 PROVIDER_WINDOWS = "windows"
 PROVIDER_GENERIC = "generic_webhook"
 PROVIDER_TEAMS = "teams_webhook"
@@ -20,6 +20,11 @@ class DeliveryResult:
     message: str
     retryable: bool = False
     test_only: bool = False
+    error_category: Optional[str] = None
+    safe_summary: Optional[str] = None
+    http_status: Optional[int] = None
+    retry_after_seconds: Optional[int] = None
+    delayed_retryable: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +93,7 @@ class NotificationSettings:
     teams_webhook_url: str = ""
     timeout_seconds: int = 5
     retry_count: int = 2
+    retry_later_enabled: bool = False
 
     def to_config(self) -> dict:
         return {
@@ -98,6 +104,7 @@ class NotificationSettings:
             "teams_webhook_url": self.teams_webhook_url,
             "notification_timeout_seconds": self.timeout_seconds,
             "notification_retry_count": self.retry_count,
+            "notification_retry_later_enabled": self.retry_later_enabled,
         }
 
     def enabled_providers(self) -> tuple[str, ...]:
@@ -143,4 +150,7 @@ def notification_settings_from_config(config: Mapping) -> NotificationSettings:
             config, "notification_timeout_seconds", 5, 1, 30
         ),
         retry_count=_bounded_int(config, "notification_retry_count", 2, 0, 5),
+        retry_later_enabled=_optional_bool(
+            config, "notification_retry_later_enabled", False
+        ),
     )

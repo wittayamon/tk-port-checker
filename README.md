@@ -40,6 +40,7 @@ The Ping and TCP results are independent: a host can respond to Ping while its c
 - Optional Minimize-to-Tray and persisted Close-to-Tray behavior
 - Provider-based notifications for Windows, Generic Webhooks, and Microsoft Teams-compatible endpoints
 - Background notification delivery with configurable timeout and retries
+- Persistent Notification Delivery History and bounded durable webhook retries
 - PyInstaller-compatible icon and resource handling
 
 ## Device Names and target data
@@ -122,7 +123,7 @@ Ping remains diagnostic information. A Ping `Timeout` does not cause a DOWN aler
 
 The native Windows notification-area icon starts with the application without any third-party runtime dependency. Startup still shows the normal main window; the application does not start hidden.
 
-The tray menu provides **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History**, **Notification Settings**, and **Exit**. These actions reuse the existing monitoring and Auto Refresh paths, so only one check cycle and one Auto Refresh timer can run. **Event History** and **Notification Settings** restore the application and open or focus the existing window.
+The tray menu provides **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History**, **Notification Settings**, **Notification History**, and **Exit**. These actions reuse the existing monitoring and Auto Refresh paths, so only one check cycle and one Auto Refresh timer can run. History and Settings actions restore the application and open or focus the existing window.
 
 - **Hide to Tray** explicitly hides the main window while monitoring continues.
 - **Minimize to tray** optionally converts normal minimization into hiding. It is disabled by default.
@@ -157,7 +158,21 @@ Each provider has a **Test** button. Test notifications use the fictional `Demo-
 
 Webhook URLs may contain secret tokens. They are masked in Notification Settings with an explicit **Show webhook URLs** control and are never included in history, CSV exports, or delivery diagnostics. URLs are stored locally as sensitive plain text in the ignored `mpc_config.json`; protect access to that file. No custom or misleading encryption is used.
 
-When the application is hidden, Event History and external notifications are processed immediately. Existing Tk alert dialogs remain deferred until the main window is restored.
+When the application is hidden, Event History, Notification Delivery History, immediate delivery, and enabled delayed retries continue. Existing Tk alert dialogs remain deferred until the main window is restored.
+
+## Notification Delivery History and durable retries
+
+Choose **Notification History** in the main window or System Tray, or **Delivery History** in Notification Settings, to inspect one persistent row for each enabled provider and each real DOWN/RECOVERED event. Disabled providers create no row. Records are newest first and show `QUEUED`, `RETRYING`, `DELIVERED`, or `FAILED`, attempt count, last/next attempt times, and a concise redacted error. Search covers Device and Host; Provider and Status filters are also available.
+
+The initial delivery policy is unchanged: webhook providers make the initial attempt plus the configured immediate retries (two by default), waiting 1 and 3 seconds. Every real attempt increments the same record. Enable **Retry failed webhook deliveries later** to add durable retry cycles after immediate retries are exhausted. It defaults to disabled for existing and new configurations. The bounded schedule is 5, 15, then 60 minutes, with at most three delayed cycles. HTTP 429, HTTP 5xx, timeouts, and temporary network/TLS failures are eligible; typical permanent HTTP 400/401/403/404 responses become `FAILED`. A bounded `Retry-After` value may extend a 429 delay up to 60 minutes.
+
+The backward-compatible config key is `"notification_retry_later_enabled": false`; a missing or malformed value safely defaults to `false`.
+
+Pending retries survive restart in `events.db`, are processed oldest-event-first through the existing bounded worker, and use the provider's current configuration and current endpoint. **Retry Selected** and **Retry All Failed** manually retry terminal failures after configuration is fixed, even when automatic cycles were exhausted. Manual and delayed retries reuse the original event snapshot and timestamp: they do not create a TCP transition or Event History row. A pending DOWN is not cancelled by a later RECOVERED event, so both chronological facts remain independently deliverable.
+
+Delivery History never stores webhook URLs, paths, query tokens, Authorization headers, request headers, response bodies, or credentials. Only provider keys and sanitized categories/summaries such as `HTTP 500` are persisted. Test Notifications are diagnostics and never enter Event History, Delivery History, or the durable queue. Windows notification attempts are recorded as `DELIVERED` when Windows Shell accepts the operation, which does not prove the user saw the balloon; failures are not delayed-retried.
+
+The newest 20,000 terminal delivery rows are retained. `QUEUED` and `RETRYING` rows are never pruned. Confirmed **Clear History** in this window deletes only terminal `DELIVERED`/`FAILED` rows and never changes active deliveries or production Event History.
 
 ## Event History
 
@@ -221,6 +236,7 @@ multi_port_checker.py       Tkinter UI and background task coordination
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
 event_history.py            SQLite Event History and CSV export helpers
+notification_history.py     SQLite delivery history and durable retry state
 windows_tray.py             Native Windows notification-area integration
 notification_models.py      Notification events and backward-compatible settings
 notification_manager.py     Bounded background delivery and retry coordinator
@@ -236,6 +252,8 @@ tests/
   test_event_history.py       Event storage, filtering, retention, and CSV tests
   test_tray_helpers.py        Tray preferences, actions, and lifecycle tests
   test_notification_manager.py Notification settings, transitions, queue, and shutdown tests
+  test_notification_history.py Delivery storage, filtering, retention, and recovery tests
+  test_notification_retry_queue.py Durable/manual retry and localhost integration tests
   test_webhook_notifications.py Local HTTP delivery and payload tests
   test_windows_notifications.py Native notification formatting/provider tests
 MultiPortChecker.spec       PyInstaller build configuration
@@ -250,7 +268,7 @@ Future documentation screenshots must use sanitized fictional data and belong un
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 ```
 
 ## Roadmap

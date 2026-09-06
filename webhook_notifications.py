@@ -3,6 +3,8 @@
 import json
 import socket
 import ssl
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 from urllib import error, parse, request
 
 from notification_models import (
@@ -119,6 +121,8 @@ class HttpWebhookProvider:
                 f"{self.display_name} requires a valid HTTP(S) endpoint.",
                 retryable=False,
                 test_only=event.test_only,
+                error_category="PROVIDER_DISABLED",
+                safe_summary="Provider endpoint is invalid",
             )
         body = json.dumps(
             self._payload_builder(event), ensure_ascii=False
@@ -142,21 +146,10 @@ class HttpWebhookProvider:
                     f"{self.display_name} delivered successfully (HTTP {status}).",
                     test_only=event.test_only,
                 )
-            return DeliveryResult(
-                self.key,
-                False,
-                f"{self.display_name} delivery failed: HTTP {status}.",
-                retryable=True,
-                test_only=event.test_only,
-            )
+            return self._http_failure(status, event)
         except error.HTTPError as exc:
-            return DeliveryResult(
-                self.key,
-                False,
-                f"{self.display_name} delivery failed: HTTP {exc.code}.",
-                retryable=True,
-                test_only=event.test_only,
-            )
+            retry_after = _bounded_retry_after(exc.headers.get("Retry-After")) if exc.code == 429 else None
+            return self._http_failure(exc.code, event, retry_after)
         except (TimeoutError, socket.timeout):
             return DeliveryResult(
                 self.key,
@@ -164,6 +157,8 @@ class HttpWebhookProvider:
                 f"{self.display_name} delivery timed out.",
                 retryable=True,
                 test_only=event.test_only,
+                error_category="TIMEOUT",
+                safe_summary="Request timed out",
             )
         except ssl.SSLError:
             return DeliveryResult(
@@ -172,15 +167,73 @@ class HttpWebhookProvider:
                 f"{self.display_name} delivery failed due to TLS validation.",
                 retryable=True,
                 test_only=event.test_only,
+                error_category="SSL",
+                safe_summary="TLS connection failed",
             )
-        except (error.URLError, OSError, ValueError):
+        except error.URLError as exc:
+            reason = exc.reason
+            if isinstance(reason, (TimeoutError, socket.timeout)):
+                category, summary, message = "TIMEOUT", "Request timed out", "delivery timed out"
+            elif isinstance(reason, ssl.SSLError):
+                category, summary, message = "SSL", "TLS connection failed", "delivery failed due to TLS validation"
+            else:
+                category, summary, message = "NETWORK", "Network connection failed", "delivery failed due to a network error"
+            return DeliveryResult(
+                self.key, False, f"{self.display_name} {message}.", retryable=True,
+                test_only=event.test_only, error_category=category,
+                safe_summary=summary, delayed_retryable=True,
+            )
+        except (OSError, ValueError):
             return DeliveryResult(
                 self.key,
                 False,
                 f"{self.display_name} delivery failed due to a network error.",
                 retryable=True,
                 test_only=event.test_only,
+                error_category="NETWORK",
+                safe_summary="Network connection failed",
+                delayed_retryable=True,
             )
+
+    def _http_failure(self, status: int, event: NotificationEvent,
+                      retry_after: int = None) -> DeliveryResult:
+        status = int(status)
+        retryable = status == 429 or 500 <= status <= 599
+        category = "HTTP_429" if status == 429 else (
+            "HTTP_5XX" if 500 <= status <= 599 else "HTTP_4XX"
+        )
+        return DeliveryResult(
+            self.key,
+            False,
+            f"{self.display_name} delivery failed: HTTP {status}.",
+            # Preserve v1.7 immediate retries for HTTP failures; the separate
+            # delayed flag prevents permanent 4xx responses entering the queue.
+            retryable=True,
+            test_only=event.test_only,
+            error_category=category,
+            safe_summary=f"HTTP {status}",
+            http_status=status,
+            retry_after_seconds=retry_after,
+            delayed_retryable=retryable,
+        )
+
+
+def _bounded_retry_after(value, *, now=None, maximum=3600):
+    """Parse Retry-After seconds/date and cap untrusted delays at one hour."""
+    if value is None:
+        return None
+    try:
+        seconds = int(str(value).strip())
+    except (TypeError, ValueError):
+        try:
+            target = parsedate_to_datetime(str(value).strip())
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=timezone.utc)
+            current = now or datetime.now(timezone.utc)
+            seconds = int((target - current).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return max(0, min(int(maximum), seconds))
 
 
 class GenericWebhookProvider(HttpWebhookProvider):

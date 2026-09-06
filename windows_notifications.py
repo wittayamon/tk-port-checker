@@ -51,4 +51,6 @@ class WindowsNotificationProvider:
             ),
             retryable=False,
             test_only=event.test_only,
+            error_category=None if accepted else "WINDOWS_NOTIFICATION",
+            safe_summary=None if accepted else "Windows notification is unavailable",
         )

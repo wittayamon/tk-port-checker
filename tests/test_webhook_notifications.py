@@ -8,6 +8,7 @@ from unittest.mock import patch
 from notification_manager import NotificationManager
 from notification_models import NotificationEvent, NotificationSettings, PROVIDER_GENERIC
 from webhook_notifications import (
+    _bounded_retry_after,
     GenericWebhookProvider,
     TeamsWebhookProvider,
     endpoint_is_valid,
@@ -68,6 +69,11 @@ class LocalWebhookServer:
 
 
 class WebhookPayloadTests(unittest.TestCase):
+    def test_retry_after_seconds_are_bounded(self):
+        self.assertEqual(_bounded_retry_after("120"), 120)
+        self.assertEqual(_bounded_retry_after("99999"), 3600)
+        self.assertIsNone(_bounded_retry_after("invalid"))
+
     def test_generic_payload_contains_transition_and_unicode(self):
         payload = generic_webhook_payload(event())
         self.assertEqual(payload["source"], "MultiPortChecker")
@@ -139,6 +145,21 @@ class WebhookDeliveryTests(unittest.TestCase):
         self.assertIn("HTTP 401", result.message)
         self.assertNotIn("token", result.message)
         self.assertNotIn(server.url, result.message)
+        self.assertFalse(result.delayed_retryable)
+
+    def test_http_429_is_delayed_retryable_with_bounded_retry_after(self):
+        with LocalWebhookServer() as server:
+            RecordingHandler.statuses = [429]
+            result = GenericWebhookProvider(server.url).deliver(event(), 2)
+        self.assertEqual(result.error_category, "HTTP_429")
+        self.assertTrue(result.delayed_retryable)
+
+    def test_http_500_is_delayed_retryable(self):
+        with LocalWebhookServer() as server:
+            RecordingHandler.statuses = [500]
+            result = GenericWebhookProvider(server.url).deliver(event(), 2)
+        self.assertEqual(result.safe_summary, "HTTP 500")
+        self.assertTrue(result.delayed_retryable)
 
     def test_timeout_is_contained_and_endpoint_is_not_exposed(self):
         endpoint = "https://example.invalid/hook/fictional-token"

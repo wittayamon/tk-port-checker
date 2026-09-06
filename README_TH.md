@@ -40,6 +40,7 @@
 - Minimize-to-Tray แบบเลือกได้และ Close-to-Tray ที่บันทึกการตั้งค่า
 - ระบบ Notification แบบ provider สำหรับ Windows, Generic Webhook และ endpoint ที่รองรับ Microsoft Teams
 - ส่ง Notification เบื้องหลังพร้อมกำหนด timeout และ retry ได้
+- ประวัติการส่ง Notification แบบถาวรและคิว retry webhook แบบทนทานที่มีขอบเขต
 - การจัดการ icon และ resource ที่รองรับ PyInstaller
 
 ## Device Name และข้อมูลเป้าหมาย
@@ -122,7 +123,7 @@ Ping ยังคงเป็นข้อมูลสำหรับวินิ
 
 ไอคอน notification area แบบ native ของ Windows จะเริ่มพร้อมแอปโดยไม่ใช้ runtime dependency ภายนอก เมื่อเริ่มโปรแกรม หน้าต่างหลักจะยังแสดงตามปกติและแอปจะไม่เริ่มแบบซ่อน
 
-เมนู tray มี **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History**, **Notification Settings** และ **Exit** คำสั่งเหล่านี้ใช้เส้นทางการเฝ้าติดตามและ Auto Refresh เดิม จึงมีรอบตรวจสอบและ Auto Refresh timer เพียงชุดเดียว **Event History** และ **Notification Settings** จะคืนหน้าต่างหลักและเปิดหรือโฟกัสหน้าต่างที่มีอยู่
+เมนู tray มี **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History**, **Notification Settings**, **Notification History** และ **Exit** คำสั่งเหล่านี้ใช้เส้นทางการเฝ้าติดตามและ Auto Refresh เดิม จึงมีรอบตรวจสอบและ Auto Refresh timer เพียงชุดเดียว คำสั่ง History และ Settings จะคืนหน้าต่างหลักและเปิดหรือโฟกัสหน้าต่างที่มีอยู่
 
 - **Hide to Tray** ซ่อนหน้าต่างหลักโดยตั้งใจ ขณะที่การเฝ้าติดตามยังทำงานต่อ
 - **Minimize to tray** เลือกให้การ minimize ปกติเปลี่ยนเป็นการซ่อนได้ โดยค่าเริ่มต้นปิดอยู่
@@ -157,7 +158,21 @@ Notification ใช้ TCP transition หลักชุดเดียวกั
 
 Webhook URL อาจมี secret token ช่องข้อมูลจึงถูกปิดบังใน Notification Settings และมีตัวเลือก **Show webhook URLs** สำหรับแสดงอย่างชัดเจน URL จะไม่ถูกใส่ใน history, CSV export หรือข้อความวินิจฉัยการส่ง URL ถูกเก็บเป็น sensitive plain text ภายใน `mpc_config.json` ที่ถูก ignore ในเครื่อง จึงควรป้องกันการเข้าถึงไฟล์นี้ ระบบไม่ใช้การเข้ารหัสแบบกำหนดเองที่ทำให้เข้าใจผิด
 
-เมื่อซ่อนแอป Event History และ Notification ภายนอกจะถูกประมวลผลทันที ส่วน Tk alert dialog เดิมจะยังรอจนกว่าจะคืนหน้าต่างหลัก
+เมื่อซ่อนแอป Event History, Notification Delivery History, การส่งทันที และ delayed retry ที่เปิดใช้งานจะทำงานต่อ ส่วน Tk alert dialog เดิมจะยังรอจนกว่าจะคืนหน้าต่างหลัก
+
+## Notification Delivery History และ durable retry
+
+เลือก **Notification History** ในหน้าต่างหลักหรือ System Tray หรือ **Delivery History** ใน Notification Settings เพื่อดูหนึ่งระเบียนถาวรต่อ provider ที่เปิดใช้งานสำหรับแต่ละเหตุการณ์ DOWN/RECOVERED จริง provider ที่ปิดใช้งานจะไม่สร้างระเบียน รายการใหม่สุดแสดงก่อนพร้อมสถานะ `QUEUED`, `RETRYING`, `DELIVERED` หรือ `FAILED`, จำนวนครั้งที่พยายาม, เวลาพยายามล่าสุด/ครั้งถัดไป และข้อผิดพลาดแบบย่อที่ตัดข้อมูลลับออก สามารถค้นหา Device/Host และกรอง Provider/Status ได้
+
+นโยบายส่งครั้งแรกยังเหมือนเดิม: webhook จะส่งครั้งแรกและ immediate retry ตามค่าที่กำหนด (ค่าเริ่มต้นสองครั้ง) โดยรอ 1 และ 3 วินาที ทุกความพยายามจริงจะเพิ่ม attempt count ของระเบียนเดิม เปิด **Retry failed webhook deliveries later** เพื่อเพิ่ม durable retry หลัง immediate retry หมด ค่าเริ่มต้นเป็นปิดสำหรับทั้ง config ใหม่และ config v1.7 เดิม ตาราง retry ที่มีขอบเขตคือ 5, 15 และ 60 นาที สูงสุดสาม delayed cycles เฉพาะ HTTP 429, HTTP 5xx, timeout และความผิดพลาด network/TLS ชั่วคราวเท่านั้นที่ retry อัตโนมัติภายหลัง ส่วน HTTP 400/401/403/404 โดยทั่วไปจะเป็น `FAILED` ค่า `Retry-After` ของ 429 อาจขยายเวลารอได้แต่จำกัดสูงสุด 60 นาที
+
+config key ที่เข้ากันได้กับรุ่นเดิมคือ `"notification_retry_later_enabled": false` หากไม่มีค่าหรือค่าไม่ถูกต้อง ระบบจะใช้ `false` อย่างปลอดภัย
+
+งาน retry คงอยู่ข้ามการเปิดแอปใหม่ใน `events.db` ประมวลผลตาม timestamp ของเหตุการณ์เก่าสุดก่อนผ่าน worker แบบ bounded เดิม และใช้ config กับ endpoint ปัจจุบันของ provider ปุ่ม **Retry Selected** และ **Retry All Failed** ใช้ส่งระเบียนที่ล้มเหลวด้วยตนเองหลังแก้ config แม้ automatic retry จะครบแล้ว การ retry ใช้ snapshot และ timestamp เดิม ไม่สร้าง TCP transition หรือ Event History ใหม่ DOWN ที่ยังส่งไม่สำเร็จจะไม่ถูกยกเลิกเมื่อเกิด RECOVERED ดังนั้นทั้งสองเหตุการณ์ยังส่งแยกกันตามลำดับเวลาได้
+
+Delivery History ไม่เก็บ webhook URL, path, query token, Authorization header, request header, response body หรือ credential โดยเก็บเพียง provider key และหมวด/ข้อความที่ปลอดภัย เช่น `HTTP 500` Test Notification เป็นเพียงการวินิจฉัยและจะไม่เข้า Event History, Delivery History หรือ durable queue การส่ง Windows จะบันทึก `DELIVERED` เมื่อ Windows Shell รับคำสั่ง ซึ่งไม่ได้ยืนยันว่าผู้ใช้เห็น balloon และจะไม่มี delayed retry สำหรับ Windows
+
+ระบบเก็บ terminal delivery records ใหม่สุด 20,000 แถว และไม่ตัด `QUEUED` หรือ `RETRYING` ปุ่ม **Clear History** ที่ต้องยืนยันจะลบเฉพาะ `DELIVERED`/`FAILED` โดยไม่เปลี่ยนงานที่ active หรือ Event History
 
 ## Event History
 
@@ -221,6 +236,7 @@ multi_port_checker.py       Tkinter UI and background task coordination
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
 event_history.py            SQLite Event History and CSV export helpers
+notification_history.py     SQLite delivery history and durable retry state
 windows_tray.py             Native Windows notification-area integration
 notification_models.py      Notification events and backward-compatible settings
 notification_manager.py     Bounded background delivery and retry coordinator
@@ -236,6 +252,8 @@ tests/
   test_event_history.py       Event storage, filtering, retention, and CSV tests
   test_tray_helpers.py        Tray preferences, actions, and lifecycle tests
   test_notification_manager.py Notification settings, transitions, queue, and shutdown tests
+  test_notification_history.py Delivery storage, filtering, retention, and recovery tests
+  test_notification_retry_queue.py Durable/manual retry and localhost integration tests
   test_webhook_notifications.py Local HTTP delivery and payload tests
   test_windows_notifications.py Native notification formatting/provider tests
 MultiPortChecker.spec       PyInstaller build configuration
@@ -250,7 +268,7 @@ Screenshot สำหรับเอกสารในอนาคตต้อง
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 ```
 
 ## แผนงานในอนาคต

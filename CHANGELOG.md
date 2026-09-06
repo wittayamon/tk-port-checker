@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased — recommended v1.8.0
+
+### Added
+
+- Persistent Notification Delivery History in a separate `events.db` table.
+- Bounded durable retry queue for Generic Webhook and Teams-compatible providers.
+- Optional automatic retry-later scheduling at 5, 15, and 60 minutes.
+- Manual **Retry Selected** and **Retry All Failed** actions.
+- Device/Host search plus Provider and Status delivery-history filters.
+- Startup recovery of pending and interrupted webhook deliveries.
+- Main-window, Notification Settings, and System Tray access to Notification History.
+
+### Improved
+
+- Notification auditability with attempt counts and original event timestamps.
+- Safe structured failure categories and redacted persisted diagnostics.
+- Retry state persistence across application restarts and hidden/tray operation.
+- Oldest-event-first due processing and duplicate in-process job protection.
+- Bounded retention of the newest 20,000 terminal delivery records while preserving active rows.
+- Canonical shutdown now stops both delivery and retry-scheduler workers while leaving recoverable durable state.
+- Native tray ctypes cleanup now preserves the original startup error on 64-bit Windows handles.
+
 ## v1.7.0 - 2026-09-05
 
 ### Added

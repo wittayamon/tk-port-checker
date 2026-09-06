@@ -29,6 +29,7 @@ from monitoring_state import (
     normalize_host_record,
 )
 from notification_manager import NotificationManager
+from notification_history import NotificationHistoryStore
 from notification_models import (
     DeliveryResult,
     NotificationEvent,
@@ -50,6 +51,7 @@ from windows_tray import (
     TRAY_ACTION_EVENT_HISTORY,
     TRAY_ACTION_EXIT,
     TRAY_ACTION_NOTIFICATION_SETTINGS,
+    TRAY_ACTION_NOTIFICATION_HISTORY,
     TRAY_ACTION_OPEN,
     TRAY_ACTION_START_AUTO,
     TRAY_ACTION_STOP_AUTO,
@@ -79,8 +81,10 @@ trace_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="trace-rou
 trace_windows = set()
 event_history_windows = set()
 notification_settings_windows = set()
+notification_history_windows = set()
 tcp_state_tracker = TcpStateTracker()
 event_history_store = None
+notification_history_store = None
 notification_settings = NotificationSettings()
 notification_manager = None
 notification_result_queue = queue.Queue()
@@ -128,6 +132,13 @@ def get_event_history_store():
     if event_history_store is None:
         event_history_store = EventHistoryStore(get_event_db_path())
     return event_history_store
+
+
+def get_notification_history_store():
+    global notification_history_store
+    if notification_history_store is None:
+        notification_history_store = NotificationHistoryStore(get_event_db_path())
+    return notification_history_store
 
 
 def resource_path(relative_path: str) -> str:
@@ -1135,6 +1146,204 @@ def open_event_history():
     return EventHistoryWindow(root)
 
 
+# ===================== Notification Delivery History =====================
+
+PROVIDER_LABELS = {
+    PROVIDER_WINDOWS: "Windows",
+    PROVIDER_GENERIC: "Generic Webhook",
+    PROVIDER_TEAMS: "Teams",
+}
+
+
+class NotificationHistoryWindow:
+    """Filter and operate on endpoint-free provider delivery records."""
+
+    def __init__(self, parent):
+        self.window = tk.Toplevel(parent)
+        apply_window_icon(self.window)
+        self.window.title("Notification Delivery History")
+        self.window.geometry("1180x570")
+        self.window.minsize(900, 420)
+        self._closed = False
+        self.search_var = tk.StringVar()
+        self.provider_var = tk.StringVar(value="All")
+        self.status_filter_var = tk.StringVar(value="All")
+
+        self.filter_frame = tk.Frame(self.window)
+        self.filter_frame.pack(fill="x", padx=10, pady=10)
+        self.search_label = tk.Label(self.filter_frame, text="Device / Host:")
+        self.search_label.grid(row=0, column=0, padx=(0, 4))
+        self.search_entry = tk.Entry(self.filter_frame, textvariable=self.search_var, width=24)
+        self.search_entry.grid(row=0, column=1, padx=(0, 10))
+        self.provider_label = tk.Label(self.filter_frame, text="Provider:")
+        self.provider_label.grid(row=0, column=2, padx=(0, 4))
+        self.provider_combo = ttk.Combobox(
+            self.filter_frame, textvariable=self.provider_var, state="readonly", width=18,
+            values=("All", "Windows", "Generic Webhook", "Teams"), style="Delivery.TCombobox"
+        )
+        self.provider_combo.grid(row=0, column=3, padx=(0, 10))
+        self.status_filter_label = tk.Label(self.filter_frame, text="Status:")
+        self.status_filter_label.grid(row=0, column=4, padx=(0, 4))
+        self.status_combo = ttk.Combobox(
+            self.filter_frame, textvariable=self.status_filter_var, state="readonly", width=12,
+            values=("All", "QUEUED", "RETRYING", "DELIVERED", "FAILED"),
+            style="Delivery.TCombobox",
+        )
+        self.status_combo.grid(row=0, column=5, padx=(0, 10))
+        self.filter_button = tk.Button(self.filter_frame, text="Apply", command=self.refresh)
+        self.filter_button.grid(row=0, column=6, padx=4)
+        self.reset_button = tk.Button(self.filter_frame, text="Reset", command=self.reset_filters)
+        self.reset_button.grid(row=0, column=7, padx=4)
+        self.search_entry.bind("<Return>", lambda _event: self.refresh())
+
+        columns = ("time", "device", "event", "provider", "status", "attempts",
+                   "last", "next", "error")
+        self.table_frame = tk.Frame(self.window)
+        self.table_frame.pack(fill="both", expand=True, padx=10, pady=(0, 5))
+        self.tree = ttk.Treeview(self.table_frame, columns=columns, show="headings",
+                                 style="Delivery.Treeview", selectmode="extended")
+        headings = dict(zip(columns, ("Date / Time", "Device", "Event", "Provider", "Status",
+                                      "Attempts", "Last Attempt", "Next Retry", "Error")))
+        widths = {"time":150, "device":150, "event":85, "provider":130, "status":90,
+                  "attempts":65, "last":150, "next":150, "error":180}
+        for column in columns:
+            self.tree.heading(column, text=headings[column])
+            self.tree.column(column, width=widths[column], anchor="center" if column in
+                             ("event", "status", "attempts") else "w")
+        scroll_y = ttk.Scrollbar(self.table_frame, orient="vertical", command=self.tree.yview)
+        scroll_x = ttk.Scrollbar(self.table_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        self.table_frame.grid_rowconfigure(0, weight=1)
+        self.table_frame.grid_columnconfigure(0, weight=1)
+
+        self.status_var = tk.StringVar()
+        self.status_label = tk.Label(self.window, textvariable=self.status_var, anchor="w")
+        self.status_label.pack(fill="x", padx=10)
+        self.button_frame = tk.Frame(self.window)
+        self.button_frame.pack(pady=(5, 10))
+        self.refresh_button = tk.Button(self.button_frame, text="Refresh", width=14, command=self.refresh)
+        self.retry_button = tk.Button(self.button_frame, text="Retry Selected", width=14, command=self.retry_selected)
+        self.retry_all_button = tk.Button(self.button_frame, text="Retry All Failed", width=14, command=self.retry_all)
+        self.clear_button = tk.Button(self.button_frame, text="Clear History", width=14, command=self.clear_history)
+        self.close_button = tk.Button(self.button_frame, text="Close", width=14, command=self.close)
+        for index, button in enumerate((self.refresh_button, self.retry_button,
+                                        self.retry_all_button, self.clear_button, self.close_button)):
+            button.grid(row=0, column=index, padx=4)
+        notification_history_windows.add(self)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.apply_theme(current_theme)
+        self.refresh()
+
+    def _provider_key(self):
+        return {"Windows": PROVIDER_WINDOWS, "Generic Webhook": PROVIDER_GENERIC,
+                "Teams": PROVIDER_TEAMS}.get(self.provider_var.get(), "All")
+
+    def refresh(self):
+        if self._closed:
+            return
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        rows = get_notification_history_store().list_deliveries(
+            self.search_var.get(), self._provider_key(), self.status_filter_var.get()
+        )
+        for row in rows:
+            error = row.last_error_summary or "-"
+            self.tree.insert("", "end", iid=str(row.id), values=(
+                format_event_timestamp(row.created_at), row.device_name or row.host,
+                row.event_type, PROVIDER_LABELS.get(row.provider, row.provider), row.status,
+                row.attempt_count, format_event_timestamp(row.last_attempt_at) if row.last_attempt_at else "-",
+                format_event_timestamp(row.next_retry_at) if row.next_retry_at else "-", error,
+            ), tags=(row.status.lower(),))
+        self.status_var.set(f"{len(rows)} delivery record(s). Endpoints are never stored here.")
+
+    def reset_filters(self):
+        self.search_var.set("")
+        self.provider_var.set("All")
+        self.status_filter_var.set("All")
+        self.refresh()
+
+    def retry_selected(self):
+        if notification_manager is None:
+            self.status_var.set("Notification service is unavailable.")
+            return
+        selected = self.tree.selection()
+        queued = sum(notification_manager.retry_selected(int(item)) for item in selected)
+        self.status_var.set(f"Queued {queued} failed delivery retry/retries.")
+        self.window.after(100, self.refresh)
+
+    def retry_all(self):
+        queued = notification_manager.retry_all_failed() if notification_manager else 0
+        self.status_var.set(f"Queued {queued} failed delivery retry/retries.")
+        self.window.after(100, self.refresh)
+
+    def clear_history(self):
+        if not messagebox.askyesno(
+            "Clear Delivery History",
+            "Delete terminal DELIVERED and FAILED rows?\n\nEvent History and active retries are not affected.",
+            parent=self.window,
+        ):
+            return
+        if get_notification_history_store().clear_terminal():
+            self.refresh()
+
+    def apply_theme(self, theme):
+        if self._closed:
+            return
+        palette = get_theme_palette(theme)
+        self.window.configure(bg=palette["bg"])
+        for frame in (self.filter_frame, self.table_frame, self.button_frame):
+            frame.configure(bg=palette["bg"])
+        for label in (self.search_label, self.provider_label, self.status_filter_label,
+                      self.status_label):
+            label.configure(bg=palette["bg"], fg=palette["fg"])
+        self.search_entry.configure(bg=palette["entry_bg"], fg=palette["entry_fg"],
+                                    insertbackground=palette["entry_fg"])
+        for button in (self.filter_button, self.reset_button, self.refresh_button,
+                       self.retry_button, self.retry_all_button, self.clear_button,
+                       self.close_button):
+            button.configure(bg=palette["button_bg"], fg=palette["fg"])
+        style = ttk.Style()
+        style.configure("Delivery.Treeview", background=palette["tree_bg"],
+                        foreground=palette["tree_fg"], fieldbackground=palette["tree_bg"])
+        style.configure("Delivery.TCombobox", fieldbackground=palette["entry_bg"],
+                        foreground=palette["entry_fg"])
+        self.tree.tag_configure("failed", foreground="#c62828")
+        self.tree.tag_configure("delivered", foreground="#2e7d32")
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        notification_history_windows.discard(self)
+        try:
+            self.window.destroy()
+        except tk.TclError:
+            pass
+
+
+def refresh_notification_history_windows():
+    for history_window in tuple(notification_history_windows):
+        history_window.refresh()
+
+
+def open_notification_history():
+    for history_window in tuple(notification_history_windows):
+        if not history_window._closed:
+            try:
+                history_window.window.deiconify()
+                history_window.window.lift()
+                history_window.window.focus_force()
+                history_window.refresh()
+                return history_window
+            except tk.TclError:
+                pass
+        notification_history_windows.discard(history_window)
+    return NotificationHistoryWindow(root)
+
+
 # ===================== Notification providers/settings =====================
 
 def _native_notification_callback(title: str, message: str, warning: bool) -> bool:
@@ -1167,7 +1376,10 @@ def apply_notification_settings(settings: NotificationSettings, *, persist=False
 
 def start_notification_support() -> None:
     global notification_manager, notification_poll_after_id
-    notification_manager = NotificationManager(notification_result_queue.put)
+    notification_manager = NotificationManager(
+        notification_result_queue.put,
+        history_store=get_notification_history_store(),
+    )
     apply_notification_settings(notification_settings)
     notification_poll_after_id = root.after(100, poll_notification_results)
 
@@ -1183,6 +1395,7 @@ def poll_notification_results() -> None:
             notification_last_results[result.provider] = result
             for settings_window in tuple(notification_settings_windows):
                 settings_window.handle_delivery_result(result)
+            refresh_notification_history_windows()
     except queue.Empty:
         pass
     notification_poll_after_id = root.after(100, poll_notification_results)
@@ -1195,7 +1408,7 @@ class NotificationSettingsWindow:
         self.window = tk.Toplevel(parent)
         apply_window_icon(self.window)
         self.window.title("Notification Settings")
-        self.window.geometry("720x500")
+        self.window.geometry("720x555")
         self.window.resizable(False, False)
         self._closed = False
 
@@ -1214,6 +1427,9 @@ class NotificationSettingsWindow:
         self.teams_url = tk.StringVar(value=notification_settings.teams_webhook_url)
         self.timeout_var = tk.StringVar(value=str(notification_settings.timeout_seconds))
         self.retries_var = tk.StringVar(value=str(notification_settings.retry_count))
+        self.retry_later_enabled = tk.BooleanVar(
+            value=notification_settings.retry_later_enabled
+        )
         self.show_urls = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Ready")
 
@@ -1311,6 +1527,14 @@ class NotificationSettingsWindow:
             command=self.toggle_url_visibility,
         )
         self.show_check.grid(row=0, column=4, padx=8, pady=8)
+        self.retry_later_check = tk.Checkbutton(
+            self.delivery_frame,
+            text="Retry failed webhook deliveries later (5m, 15m, 60m)",
+            variable=self.retry_later_enabled,
+        )
+        self.retry_later_check.grid(
+            row=1, column=0, columnspan=5, padx=8, pady=(0, 8), sticky="w"
+        )
 
         self.status_label = tk.Label(
             self.window, textvariable=self.status_var, anchor="w", wraplength=690
@@ -1326,6 +1550,11 @@ class NotificationSettingsWindow:
             self.button_frame, text="Cancel", width=12, command=self.close
         )
         self.cancel_button.grid(row=0, column=1, padx=5)
+        self.history_button = tk.Button(
+            self.button_frame, text="Delivery History", width=14,
+            command=open_notification_history,
+        )
+        self.history_button.grid(row=0, column=2, padx=5)
 
         notification_settings_windows.add(self)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
@@ -1365,6 +1594,7 @@ class NotificationSettingsWindow:
             teams_webhook_url=teams_url,
             timeout_seconds=timeout,
             retry_count=retries,
+            retry_later_enabled=bool(self.retry_later_enabled.get()),
         )
 
     def save(self):
@@ -1456,6 +1686,7 @@ class NotificationSettingsWindow:
             self.generic_check,
             self.teams_check,
             self.show_check,
+            self.retry_later_check,
         ):
             check.configure(
                 bg=palette["bg"],
@@ -1481,6 +1712,7 @@ class NotificationSettingsWindow:
             self.teams_test,
             self.save_button,
             self.cancel_button,
+            self.history_button,
         ):
             button.configure(
                 bg=palette["button_bg"],
@@ -1908,6 +2140,9 @@ def handle_tray_action(action: str) -> None:
     elif action == TRAY_ACTION_NOTIFICATION_SETTINGS:
         restore_main_window()
         open_notification_settings()
+    elif action == TRAY_ACTION_NOTIFICATION_HISTORY:
+        restore_main_window()
+        open_notification_history()
     elif action == TRAY_ACTION_EXIT:
         shutdown_application()
 
@@ -1973,6 +2208,8 @@ def shutdown_application() -> bool:
         history_window.close()
     for settings_window in tuple(notification_settings_windows):
         settings_window.close()
+    for history_window in tuple(notification_history_windows):
+        history_window.close()
     save_config()
     if tray_icon is not None:
         tray_icon.stop()
@@ -2168,6 +2405,7 @@ def apply_theme(theme: str):
         btn_cancel_scan,
         btn_hide_tray,
         btn_notifications,
+        btn_notification_history,
     ):
         btn.configure(bg=button_bg, fg=fg, activebackground=button_bg, activeforeground=fg)
 
@@ -2199,6 +2437,8 @@ def apply_theme(theme: str):
         history_window.apply_theme(theme)
     for settings_window in tuple(notification_settings_windows):
         settings_window.apply_theme(theme)
+    for history_window in tuple(notification_history_windows):
+        history_window.apply_theme(theme)
 
 
 # ===================== GUI =====================
@@ -2398,6 +2638,14 @@ btn_notifications = tk.Button(
     command=open_notification_settings,
 )
 btn_notifications.grid(row=4, column=0, columnspan=2, padx=5, pady=(10, 0))
+
+btn_notification_history = tk.Button(
+    frame_bottom,
+    text="Notification History",
+    width=20,
+    command=open_notification_history,
+)
+btn_notification_history.grid(row=4, column=2, columnspan=2, padx=5, pady=(10, 0))
 
 # โหลด config (theme + hosts) ก่อน apply_theme
 load_config()
