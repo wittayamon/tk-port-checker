@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased — recommended v1.9.0
+## v1.9.0 - 2026-09-07
 
 ### Added
 
@@ -12,6 +12,7 @@ All notable changes to this project are documented here.
 - Themed Outage Details view with actual event timestamps, clipped period downtime, and RECOVERED/ONGOING status.
 - Filtered UTF-8 BOM Summary and Outage Detail CSV exports.
 - Main-window and native System Tray entry points with reusable/focused report windows.
+- Host + Port report identity with current/most-recent Device Name display and explicit zero-coverage rows for configured targets without evidence.
 
 ### Improved
 
@@ -20,6 +21,7 @@ All notable changes to this project are documented here.
 - Unresolved DOWN events accumulate through the report end and are reported as ONGOING.
 - Duplicate or malformed historical transition sequences are normalized defensively by a UI-independent state machine.
 - Report querying and calculation run on a bounded background worker and remain independent from monitoring, Event History mutation, and Notification Delivery History.
+- Persistent TCP Event History remains the sole report source; Ping-only and transient range-scan results remain excluded.
 
 ## v1.8.0 - 2026-09-06
 
