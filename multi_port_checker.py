@@ -10,6 +10,19 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from tkinter import ttk, messagebox, filedialog
 
+from availability_report import (
+    ConfiguredTarget,
+    PERIODS,
+    PERIOD_CUSTOM,
+    AvailabilityReport,
+    build_availability_report,
+    export_outages_csv,
+    export_summary_csv,
+    filter_outages,
+    filter_report_rows,
+    report_period,
+    sort_report_rows,
+)
 from event_history import EventHistoryStore, EventRecord, export_events_csv
 from network_checks import (
     CHECK_WORKERS,
@@ -49,6 +62,7 @@ from windows_tray import (
     ShutdownGuard,
     TRAY_ACTION_CHECK_ALL,
     TRAY_ACTION_EVENT_HISTORY,
+    TRAY_ACTION_AVAILABILITY_REPORT,
     TRAY_ACTION_EXIT,
     TRAY_ACTION_NOTIFICATION_SETTINGS,
     TRAY_ACTION_NOTIFICATION_HISTORY,
@@ -78,8 +92,10 @@ editing_item_id = None
 
 network_executor = ThreadPoolExecutor(max_workers=CHECK_WORKERS, thread_name_prefix="network-check")
 trace_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="trace-route")
+availability_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="availability-report")
 trace_windows = set()
 event_history_windows = set()
+availability_report_windows = set()
 notification_settings_windows = set()
 notification_history_windows = set()
 tcp_state_tracker = TcpStateTracker()
@@ -1052,6 +1068,7 @@ class EventHistoryWindow:
             return
         if get_event_history_store().clear():
             refresh_event_history_windows()
+            refresh_availability_report_windows()
             messagebox.showinfo(
                 "Clear History", "Event History was cleared.", parent=self.window
             )
@@ -1144,6 +1161,352 @@ def open_event_history():
         except tk.TclError:
             event_history_windows.discard(history_window)
     return EventHistoryWindow(root)
+
+
+# ===================== Availability Report =====================
+
+def configured_report_targets():
+    """Snapshot persistent targets on Tk's main thread for report workers."""
+    targets = []
+    for item_id in tree.get_children():
+        if item_id in transient_scan_items:
+            continue
+        values = tree.item(item_id, "values")
+        try:
+            targets.append(ConfiguredTarget(str(values[COL_NAME]), str(values[COL_HOST]), int(values[COL_PORT])))
+        except (IndexError, TypeError, ValueError):
+            continue
+    return tuple(targets)
+
+
+class OutageDetailWindow:
+    def __init__(self, report_window):
+        self.report_window = report_window
+        self.window = tk.Toplevel(report_window.window)
+        apply_window_icon(self.window)
+        self.window.title("Outage Details")
+        self.window.geometry("1120x520")
+        self.window.minsize(820, 380)
+        self._closed = False
+        self.frame = tk.Frame(self.window)
+        self.frame.pack(fill="both", expand=True, padx=10, pady=10)
+        columns = ("device", "host", "port", "down", "recovered", "duration", "period", "status")
+        self.tree = ttk.Treeview(self.frame, columns=columns, show="headings", style="Availability.Treeview")
+        headings = ("Device", "Host / IP", "Port", "Down Time", "Recovered Time", "Actual Duration", "Period Downtime", "Status")
+        widths = (145, 160, 60, 165, 165, 105, 110, 90)
+        for column, heading, width in zip(columns, headings, widths):
+            self.tree.heading(column, text=heading)
+            self.tree.column(column, width=width, anchor="center" if column in ("port", "duration", "period", "status") else "w")
+        scroll_y = ttk.Scrollbar(self.frame, orient="vertical", command=self.tree.yview)
+        scroll_x = ttk.Scrollbar(self.frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        self.frame.grid_rowconfigure(0, weight=1)
+        self.frame.grid_columnconfigure(0, weight=1)
+        self.button_frame = tk.Frame(self.window)
+        self.button_frame.pack(pady=(0, 10))
+        self.export_button = tk.Button(self.button_frame, text="Export Outages CSV", width=20, command=self.export_csv)
+        self.export_button.grid(row=0, column=0, padx=5)
+        self.close_button = tk.Button(self.button_frame, text="Close", width=14, command=self.close)
+        self.close_button.grid(row=0, column=1, padx=5)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.apply_theme(current_theme)
+        self.refresh()
+
+    def current_outages(self):
+        report = self.report_window.report
+        return [] if report is None else filter_outages(report.outages, self.report_window.search_var.get())
+
+    def refresh(self):
+        if self._closed:
+            return
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for outage in self.current_outages():
+            self.tree.insert("", "end", values=(
+                outage.device_name or outage.host, outage.host, outage.port,
+                outage.down_at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+                "-" if outage.recovered_at is None else outage.recovered_at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+                "-" if outage.actual_duration_seconds is None else format_duration(outage.actual_duration_seconds),
+                format_duration(outage.period_overlap_seconds), outage.status,
+            ), tags=(outage.status.lower(),))
+
+    def export_csv(self):
+        path = filedialog.asksaveasfilename(parent=self.window, defaultextension=".csv", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")], title="Export Outage Details")
+        if not path:
+            return
+        try:
+            count = export_outages_csv(path, self.current_outages())
+        except (OSError, UnicodeError) as exc:
+            messagebox.showerror("Export CSV", f"Unable to export Outage Details:\n{exc}", parent=self.window)
+            return
+        messagebox.showinfo("Export CSV", f"Exported {count} outage(s).", parent=self.window)
+
+    def apply_theme(self, theme):
+        palette = get_theme_palette(theme)
+        self.window.configure(bg=palette["bg"])
+        self.frame.configure(bg=palette["bg"])
+        self.button_frame.configure(bg=palette["bg"])
+        for button in (self.export_button, self.close_button):
+            button.configure(bg=palette["button_bg"], fg=palette["fg"], activebackground=palette["button_bg"], activeforeground=palette["fg"])
+        style = ttk.Style()
+        style.configure("Availability.Treeview", background=palette["tree_bg"], foreground=palette["tree_fg"], fieldbackground=palette["tree_bg"])
+        style.configure("Availability.Treeview.Heading", background=palette["button_bg"], foreground=palette["fg"])
+        self.tree.tag_configure("ongoing", foreground="#c62828")
+        self.tree.tag_configure("recovered", foreground="#2e7d32")
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self.report_window.detail_window = None
+        try:
+            self.window.destroy()
+        except tk.TclError:
+            pass
+
+
+class AvailabilityReportWindow:
+    """Themed, reusable, non-blocking view over retained TCP Event History."""
+    def __init__(self, parent):
+        self.window = tk.Toplevel(parent)
+        apply_window_icon(self.window)
+        self.window.title("Availability Report")
+        self.window.geometry("1180x590")
+        self.window.minsize(920, 430)
+        self._closed = False
+        self._generation = 0
+        self._result_queue = queue.Queue()
+        self._poll_after_id = None
+        self.report = None
+        self.display_rows = []
+        self.detail_window = None
+        self.sort_column = "device"
+        self.sort_reverse = False
+
+        today = datetime.now().astimezone().date().isoformat()
+        self.period_var = tk.StringVar(value=PERIODS[0])
+        self.start_var = tk.StringVar(value=today)
+        self.end_var = tk.StringVar(value=today)
+        self.search_var = tk.StringVar()
+        self.controls = tk.Frame(self.window)
+        self.controls.pack(fill="x", padx=10, pady=10)
+        self.period_label = tk.Label(self.controls, text="Period:")
+        self.period_label.grid(row=0, column=0, padx=(0, 4))
+        self.period_combo = ttk.Combobox(self.controls, textvariable=self.period_var, values=PERIODS, state="readonly", width=12, style="Availability.TCombobox")
+        self.period_combo.grid(row=0, column=1, padx=(0, 10))
+        self.period_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_custom_state())
+        self.start_label = tk.Label(self.controls, text="Start Date:")
+        self.start_label.grid(row=0, column=2, padx=(0, 4))
+        self.start_entry = tk.Entry(self.controls, textvariable=self.start_var, width=12)
+        self.start_entry.grid(row=0, column=3, padx=(0, 10))
+        self.end_label = tk.Label(self.controls, text="End Date:")
+        self.end_label.grid(row=0, column=4, padx=(0, 4))
+        self.end_entry = tk.Entry(self.controls, textvariable=self.end_var, width=12)
+        self.end_entry.grid(row=0, column=5, padx=(0, 10))
+        self.search_label = tk.Label(self.controls, text="Search:")
+        self.search_label.grid(row=0, column=6, padx=(0, 4))
+        self.search_entry = tk.Entry(self.controls, textvariable=self.search_var, width=22)
+        self.search_entry.grid(row=0, column=7, padx=(0, 8))
+        self.refresh_button = tk.Button(self.controls, text="Refresh", width=10, command=self.refresh)
+        self.refresh_button.grid(row=0, column=8)
+        self.search_entry.bind("<Return>", lambda _event: self.apply_filter())
+
+        self.kpi_var = tk.StringVar(value="")
+        self.kpi_label = tk.Label(self.window, textvariable=self.kpi_var, anchor="w")
+        self.kpi_label.pack(fill="x", padx=10, pady=(0, 5))
+        self.table_frame = tk.Frame(self.window)
+        self.table_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        columns = ("device", "host", "port", "availability", "coverage", "downtime", "outages", "longest", "mttr")
+        headings = {"device":"Device", "host":"Host / IP", "port":"Port", "availability":"Availability", "coverage":"Coverage", "downtime":"Downtime", "outages":"Outages", "longest":"Longest Outage", "mttr":"MTTR"}
+        widths = {"device":145, "host":160, "port":60, "availability":95, "coverage":85, "downtime":95, "outages":70, "longest":110, "mttr":90}
+        self.tree = ttk.Treeview(self.table_frame, columns=columns, show="headings", style="Availability.Treeview")
+        for column in columns:
+            command = (lambda col=column: self.sort_by(col)) if column in ("device", "availability", "downtime", "outages") else None
+            if command is None:
+                self.tree.heading(column, text=headings[column])
+            else:
+                self.tree.heading(column, text=headings[column], command=command)
+            self.tree.column(column, width=widths[column], anchor="center" if column not in ("device", "host") else "w")
+        scroll_y = ttk.Scrollbar(self.table_frame, orient="vertical", command=self.tree.yview)
+        scroll_x = ttk.Scrollbar(self.table_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        self.table_frame.grid_rowconfigure(0, weight=1)
+        self.table_frame.grid_columnconfigure(0, weight=1)
+        self.status_var = tk.StringVar(value="")
+        self.status_label = tk.Label(self.window, textvariable=self.status_var, anchor="w")
+        self.status_label.pack(fill="x", padx=10)
+        self.buttons = tk.Frame(self.window)
+        self.buttons.pack(pady=(5, 10))
+        self.export_button = tk.Button(self.buttons, text="Export Summary CSV", width=20, command=self.export_csv)
+        self.export_button.grid(row=0, column=0, padx=5)
+        self.details_button = tk.Button(self.buttons, text="Outage Details", width=16, command=self.open_details)
+        self.details_button.grid(row=0, column=1, padx=5)
+        self.close_button = tk.Button(self.buttons, text="Close", width=14, command=self.close)
+        self.close_button.grid(row=0, column=2, padx=5)
+        availability_report_windows.add(self)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self._update_custom_state()
+        self.apply_theme(current_theme)
+        self._poll_after_id = self.window.after(50, self._poll_results)
+        self.refresh()
+
+    def _update_custom_state(self):
+        state = "normal" if self.period_var.get() == PERIOD_CUSTOM else "disabled"
+        self.start_entry.configure(state=state)
+        self.end_entry.configure(state=state)
+
+    def refresh(self):
+        if self._closed:
+            return
+        try:
+            start, end = report_period(self.period_var.get(), start_date=self.start_var.get(), end_date=self.end_var.get())
+        except ValueError as exc:
+            messagebox.showwarning("Availability Report", str(exc), parent=self.window)
+            return
+        self._generation += 1
+        generation = self._generation
+        targets = configured_report_targets()
+        self.refresh_button.configure(state="disabled")
+        self.status_var.set("Calculating from retained Event History...")
+        future = availability_executor.submit(build_availability_report, get_event_history_store(), start, end, targets)
+        future.add_done_callback(lambda completed, token=generation: self._result_queue.put((token, completed)))
+
+    def _poll_results(self):
+        self._poll_after_id = None
+        if self._closed:
+            return
+        try:
+            while True:
+                generation, future = self._result_queue.get_nowait()
+                if generation != self._generation:
+                    continue
+                try:
+                    self.report = future.result()
+                except Exception as exc:
+                    self.status_var.set("Availability Report is unavailable")
+                    messagebox.showerror("Availability Report", f"Unable to calculate report:\n{exc}", parent=self.window)
+                else:
+                    self.apply_filter()
+                self.refresh_button.configure(state="normal")
+        except queue.Empty:
+            pass
+        self._poll_after_id = self.window.after(50, self._poll_results)
+
+    def apply_filter(self):
+        if self.report is None:
+            return
+        self.display_rows = filter_report_rows(self.report.rows, self.search_var.get())
+        self.display_rows = sort_report_rows(self.display_rows, self.sort_column, self.sort_reverse)
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for row in self.display_rows:
+            self.tree.insert("", "end", values=(
+                row.display_name, row.host, row.port,
+                "-" if row.availability_percent is None else f"{row.availability_percent:.2f}%",
+                f"{row.coverage_percent:.2f}%",
+                "-" if row.known_duration_seconds <= 0 else format_duration(row.downtime_seconds),
+                row.outage_count, format_duration(row.longest_outage_seconds) if row.outage_count else "-",
+                "-" if row.mttr_seconds is None else format_duration(row.mttr_seconds),
+            ))
+        known_rows = [row for row in self.display_rows if row.availability_percent is not None]
+        average = "-" if not known_rows else f"{sum(row.availability_percent for row in known_rows) / len(known_rows):.2f}%"
+        self.kpi_var.set(f"Monitored Targets: {len(self.display_rows)}    Average Availability: {average}    Total Outages: {sum(row.outage_count for row in self.display_rows)}    Total Downtime: {format_duration(sum(row.downtime_seconds for row in self.display_rows))}")
+        self.status_var.set(f"Showing {len(self.display_rows)} target(s) | {self.report.period_start.astimezone():%Y-%m-%d %H:%M:%S} to {self.report.period_end.astimezone():%Y-%m-%d %H:%M:%S}")
+        if self.detail_window is not None:
+            self.detail_window.refresh()
+
+    def sort_by(self, column):
+        mapped = column
+        self.sort_reverse = not self.sort_reverse if self.sort_column == mapped else False
+        self.sort_column = mapped
+        self.apply_filter()
+
+    def export_csv(self):
+        if self.report is None:
+            return
+        path = filedialog.asksaveasfilename(parent=self.window, defaultextension=".csv", filetypes=[("CSV files", "*.csv"), ("All files", "*.*")], title="Export Availability Summary")
+        if not path:
+            return
+        try:
+            count = export_summary_csv(path, self.display_rows)
+        except (OSError, UnicodeError) as exc:
+            messagebox.showerror("Export CSV", f"Unable to export Availability Summary:\n{exc}", parent=self.window)
+            return
+        messagebox.showinfo("Export CSV", f"Exported {count} target(s).", parent=self.window)
+
+    def open_details(self):
+        if self.report is None:
+            return
+        if self.detail_window is not None and not self.detail_window._closed:
+            self.detail_window.window.deiconify()
+            self.detail_window.window.lift()
+            self.detail_window.window.focus_force()
+            self.detail_window.refresh()
+            return
+        self.detail_window = OutageDetailWindow(self)
+
+    def apply_theme(self, theme):
+        palette = get_theme_palette(theme)
+        self.window.configure(bg=palette["bg"])
+        for frame in (self.controls, self.table_frame, self.buttons):
+            frame.configure(bg=palette["bg"])
+        for label in (self.period_label, self.start_label, self.end_label, self.search_label, self.kpi_label, self.status_label):
+            label.configure(bg=palette["bg"], fg=palette["fg"])
+        for entry in (self.start_entry, self.end_entry, self.search_entry):
+            entry.configure(bg=palette["entry_bg"], fg=palette["entry_fg"], insertbackground=palette["entry_fg"])
+        for button in (self.refresh_button, self.export_button, self.details_button, self.close_button):
+            button.configure(bg=palette["button_bg"], fg=palette["fg"], activebackground=palette["button_bg"], activeforeground=palette["fg"])
+        style = ttk.Style()
+        style.configure("Availability.Treeview", background=palette["tree_bg"], foreground=palette["tree_fg"], fieldbackground=palette["tree_bg"])
+        style.configure("Availability.Treeview.Heading", background=palette["button_bg"], foreground=palette["fg"])
+        style.configure("Availability.TCombobox", fieldbackground=palette["entry_bg"], background=palette["button_bg"], foreground=palette["entry_fg"], arrowcolor=palette["fg"])
+        style.map("Availability.TCombobox", fieldbackground=[("readonly", palette["entry_bg"])], foreground=[("readonly", palette["entry_fg"])])
+        if self.detail_window is not None:
+            self.detail_window.apply_theme(theme)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        availability_report_windows.discard(self)
+        if self.detail_window is not None:
+            self.detail_window.close()
+        if self._poll_after_id is not None:
+            try:
+                self.window.after_cancel(self._poll_after_id)
+            except tk.TclError:
+                pass
+        try:
+            self.window.destroy()
+        except tk.TclError:
+            pass
+
+
+def refresh_availability_report_windows():
+    for report_window in tuple(availability_report_windows):
+        report_window.refresh()
+
+
+def open_availability_report():
+    for report_window in tuple(availability_report_windows):
+        if report_window._closed:
+            availability_report_windows.discard(report_window)
+            continue
+        try:
+            report_window.window.deiconify()
+            report_window.window.lift()
+            report_window.window.focus_force()
+            report_window.refresh()
+            return report_window
+        except tk.TclError:
+            availability_report_windows.discard(report_window)
+    return AvailabilityReportWindow(root)
 
 
 # ===================== Notification Delivery History =====================
@@ -2137,6 +2500,9 @@ def handle_tray_action(action: str) -> None:
     elif action == TRAY_ACTION_EVENT_HISTORY:
         restore_main_window()
         open_event_history()
+    elif action == TRAY_ACTION_AVAILABILITY_REPORT:
+        restore_main_window()
+        open_availability_report()
     elif action == TRAY_ACTION_NOTIFICATION_SETTINGS:
         restore_main_window()
         open_notification_settings()
@@ -2206,6 +2572,8 @@ def shutdown_application() -> bool:
         trace_window.close()
     for history_window in tuple(event_history_windows):
         history_window.close()
+    for report_window in tuple(availability_report_windows):
+        report_window.close()
     for settings_window in tuple(notification_settings_windows):
         settings_window.close()
     for history_window in tuple(notification_history_windows):
@@ -2216,6 +2584,7 @@ def shutdown_application() -> bool:
     tray_available = False
     network_executor.shutdown(wait=False, cancel_futures=True)
     trace_executor.shutdown(wait=False, cancel_futures=True)
+    availability_executor.shutdown(wait=False, cancel_futures=True)
     try:
         root.destroy()
     except tk.TclError:
@@ -2396,6 +2765,7 @@ def apply_theme(theme: str):
         btn_check_all,
         btn_trace,
         btn_history,
+        btn_availability,
         btn_start_auto,
         btn_stop_auto,
         btn_save,
@@ -2435,6 +2805,8 @@ def apply_theme(theme: str):
         trace_window.apply_theme(theme)
     for history_window in tuple(event_history_windows):
         history_window.apply_theme(theme)
+    for report_window in tuple(availability_report_windows):
+        report_window.apply_theme(theme)
     for settings_window in tuple(notification_settings_windows):
         settings_window.apply_theme(theme)
     for history_window in tuple(notification_history_windows):
@@ -2646,6 +3018,11 @@ btn_notification_history = tk.Button(
     command=open_notification_history,
 )
 btn_notification_history.grid(row=4, column=2, columnspan=2, padx=5, pady=(10, 0))
+
+btn_availability = tk.Button(
+    frame_bottom, text="Availability Report", width=20, command=open_availability_report
+)
+btn_availability.grid(row=5, column=0, columnspan=4, padx=5, pady=(10, 0))
 
 # โหลด config (theme + hosts) ก่อน apply_theme
 load_config()

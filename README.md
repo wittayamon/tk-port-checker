@@ -26,6 +26,9 @@ The Ping and TCP results are independent: a host can respond to Ping while its c
 - Persistent Event History with newest-first DOWN and RECOVERED records
 - Device/Host and Event Type history filters
 - Filter-aware CSV Export and confirmed Clear History controls
+- Availability / Uptime Statistics for Today, rolling 7-day, rolling 30-day, and custom date periods
+- Honest Availability and Coverage percentages with downtime, outage, longest-outage, and MTTR metrics
+- Outage Details plus Excel-compatible Summary and Outage CSV exports
 - Check Selected and Check All
 - Non-overlapping Auto Refresh
 - Responsive background checks using a bounded worker pool
@@ -123,7 +126,7 @@ Ping remains diagnostic information. A Ping `Timeout` does not cause a DOWN aler
 
 The native Windows notification-area icon starts with the application without any third-party runtime dependency. Startup still shows the normal main window; the application does not start hidden.
 
-The tray menu provides **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History**, **Notification Settings**, **Notification History**, and **Exit**. These actions reuse the existing monitoring and Auto Refresh paths, so only one check cycle and one Auto Refresh timer can run. History and Settings actions restore the application and open or focus the existing window.
+The tray menu provides **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History**, **Availability Report**, **Notification Settings**, **Notification History**, and **Exit**. These actions reuse the existing monitoring and Auto Refresh paths, so only one check cycle and one Auto Refresh timer can run. Report, History, and Settings actions restore the application and open or focus the existing window.
 
 - **Hide to Tray** explicitly hides the main window while monitoring continues.
 - **Minimize to tray** optionally converts normal minimization into hiding. It is disabled by default.
@@ -191,6 +194,34 @@ Date / Time | Device | Host / IP | Port | Event | Ping | Downtime
 
 Event History uses the standard-library SQLite database `events.db` in the same writable application directory as the local config. The database and table are created automatically when history is first used and are not bundled into the EXE. The newest 10,000 events are retained; older rows are pruned after inserts.
 
+## Availability Report
+
+Choose **Availability Report** in the main window or System Tray to calculate read-only uptime statistics from retained TCP `DOWN` and `RECOVERED` Event History. The report groups each target by Host + Port, so two services on one host remain separate. It displays the current configured Device Name when available, otherwise the newest non-empty recorded name or Host/IP. Configured persistent targets with no state evidence are included with Availability `-`, Coverage `0.00%`, Downtime `-`, and zero outages; transient IP Range Scan rows are excluded.
+
+Periods have these exact local-time semantics:
+
+- **Today**: local midnight through the current time.
+- **7 Days**: the rolling 168 hours ending at the current time.
+- **30 Days**: the rolling 720 hours ending at the current time.
+- **Custom**: inclusive Start Date and End Date in `YYYY-MM-DD`; completed past dates cover whole local calendar days, while a range ending today is capped at the current time. Invalid dates, an end before the start, and ranges that have not started are rejected.
+
+The latest event before the period establishes the starting state: `DOWN` means OFFLINE and `RECOVERED` means ONLINE. Without earlier evidence, time before the first retained event is UNKNOWN rather than assumed online. Known state continues until another event or the report end. Duplicate `DOWN` while already offline and duplicate `RECOVERED` while already online are ignored by the reporting state machine; `RECOVERED` while unknown establishes online state from that timestamp.
+
+Metrics are calculated as follows:
+
+- **Availability %** = known uptime / known duration × 100. Unknown time is excluded from this denominator.
+- **Coverage %** = known duration / requested period duration × 100, making partial evidence visible.
+- **Total Downtime**, **Outage Count**, **Longest Outage**, and **Average Outage Duration** use each outage's intersection with the selected period.
+- **MTTR** is the average full duration of outages recovered within the selected period. It is `-` when no included outage completed by the report end.
+
+Outages crossing either period boundary are clipped for period downtime. **Outage Details** still shows the actual retained DOWN and RECOVERED timestamps and separates Actual Duration from Period Downtime. A retained DOWN without a later RECOVERED event is marked **ONGOING** and accumulates only through the report end/current time. The Device/Host search filters both the summary and details. Device, Availability, Downtime, and Outages headings support sorting.
+
+**Export Summary CSV** exports the currently filtered summary rows. **Export Outages CSV** exports the currently filtered outage details. Both use UTF-8 with BOM for Excel and Unicode compatibility and contain no notification or webhook data.
+
+Availability is TCP-state based only. Ping-only results, Trace Route, notification delivery state, webhook results, and transient scan rows do not affect it. Reporting runs on a bounded background worker and does not alter Event History, Notification Delivery History, monitoring state, notifications, or retries.
+
+Event History is the sole historical source. Clearing Event History permanently removes the evidence needed to reconstruct reports for the deleted period; there is no hidden backup. Because only the newest 10,000 Event History rows are retained, report depth is limited by that retention and older missing periods appear as unknown coverage rather than uptime.
+
 ## Requirements
 
 - Python 3.9 or newer when running from source
@@ -236,6 +267,7 @@ multi_port_checker.py       Tkinter UI and background task coordination
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
 event_history.py            SQLite Event History and CSV export helpers
+availability_report.py      UI-independent uptime reconstruction and CSV reports
 notification_history.py     SQLite delivery history and durable retry state
 windows_tray.py             Native Windows notification-area integration
 notification_models.py      Notification events and backward-compatible settings
@@ -250,6 +282,7 @@ tests/
   test_trace_route_helpers.py Trace command and input-validation tests
   test_monitoring_state.py    Device-record, transition, and duration tests
   test_event_history.py       Event storage, filtering, retention, and CSV tests
+  test_availability_report.py Availability intervals, metrics, filters, and CSV tests
   test_tray_helpers.py        Tray preferences, actions, and lifecycle tests
   test_notification_manager.py Notification settings, transitions, queue, and shutdown tests
   test_notification_history.py Delivery storage, filtering, retention, and recovery tests
@@ -268,9 +301,9 @@ Future documentation screenshots must use sanitized fictional data and belong un
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 ```
 
 ## Roadmap
 
-- Optional Event History date-range filtering
+- Optional maintenance intervals excluded from future Availability calculations

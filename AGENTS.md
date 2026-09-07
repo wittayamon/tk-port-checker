@@ -19,6 +19,7 @@ Main capabilities currently include:
 - Trace Route with streaming output and process controls
 - TCP State Change Alerts with downtime tracking
 - Persistent Event History with filtering, CSV Export, and retention
+- Availability / Uptime Statistics with coverage-aware outage reporting and CSV export
 - Native Windows System Tray with background monitoring controls
 - Provider-based Windows, Generic Webhook, and Microsoft Teams-compatible notifications
 - Save / Load host lists
@@ -28,9 +29,11 @@ Main capabilities currently include:
 - PyInstaller EXE build support
 - Custom application icon
 
-Current released version: **v1.7.0**
+Current released version: **v1.8.0**
 
 Current recommended version for Notification Delivery History work: **v1.8.0**
+
+Current recommended version for Availability / Uptime Statistics work: **v1.9.0**
 
 ---
 
@@ -71,7 +74,7 @@ Before modifying the project:
 
 Keep the current release-oriented structure unless a task explicitly authorizes a larger migration:
 
-- Application modules remain at repository root: `multi_port_checker.py`, `network_checks.py`, `monitoring_state.py`, `event_history.py`, `notification_history.py`, `windows_tray.py`, `notification_models.py`, `notification_manager.py`, `windows_notifications.py`, and `webhook_notifications.py`
+- Application modules remain at repository root: `multi_port_checker.py`, `network_checks.py`, `monitoring_state.py`, `event_history.py`, `availability_report.py`, `notification_history.py`, `windows_tray.py`, `notification_models.py`, `notification_manager.py`, `windows_notifications.py`, and `webhook_notifications.py`
 - Unit tests live under `tests/`
 - Static application assets live under `assets/`
 - Future sanitized documentation images belong under `docs/images/`
@@ -84,7 +87,7 @@ Canonical verification commands from repository root are:
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 pyinstaller --clean --noconfirm MultiPortChecker.spec
 ```
 
@@ -320,6 +323,22 @@ Auto Refresh must:
 - Not start a new cycle while a previous cycle is still running
 - Stop reliably when the user presses Stop Auto
 - Avoid scheduling additional cycles after Stop Auto
+
+---
+
+## Availability Reporting Architecture
+
+- Availability derives from retained Event History `DOWN` / `RECOVERED` records only; do not build a second monitoring engine or duplicate `TcpStateTracker`
+- Unknown periods must never be treated as uptime
+- Availability uses known monitored duration as its denominator, and Coverage must always expose known duration relative to the requested period
+- Outages crossing report boundaries must be clipped with interval intersection
+- Unresolved outages must be supported through the report end/current time and identified as ongoing
+- Host + Port is the stable target identity; Device Name is a display label and must not merge different ports
+- Ping-only status, Trace Route, Notification Delivery History, webhook results, and transient IP Range Scan rows do not affect TCP Availability
+- Reporting calculations and CSV generation stay UI-independent; potentially slow report work runs outside Tk's main thread
+- Reports are read-only and must not mutate Event History, Notification History, monitoring state, notifications, or retry state
+- Event History retention and clearing directly limit report depth; do not invent hidden historical backup data
+- Keep `README.md` and `README_TH.md` synchronized for all report behavior and preserve public-repository safety in report fixtures, exports, documentation, and diagnostics
 
 ---
 

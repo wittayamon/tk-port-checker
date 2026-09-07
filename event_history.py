@@ -147,7 +147,9 @@ class EventHistoryStore:
             self.last_error = str(exc)
             return False
 
-    def list_events(self, search: str = "", event_type: str = "All"):
+    def list_events(
+        self, search: str = "", event_type: str = "All", *, oldest_first: bool = False
+    ):
         if not self.available:
             return []
         clauses = []
@@ -171,7 +173,7 @@ class EventHistoryStore:
                     FROM events
                     """
                     + where_sql
-                    + " ORDER BY id DESC",
+                    + (" ORDER BY id ASC" if oldest_first else " ORDER BY id DESC"),
                     parameters,
                 ).fetchall()
             return [EventRecord(*row) for row in rows]

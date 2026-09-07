@@ -15,6 +15,7 @@ TRAY_ACTION_CHECK_ALL = "check_all"
 TRAY_ACTION_START_AUTO = "start_auto"
 TRAY_ACTION_STOP_AUTO = "stop_auto"
 TRAY_ACTION_EVENT_HISTORY = "event_history"
+TRAY_ACTION_AVAILABILITY_REPORT = "availability_report"
 TRAY_ACTION_NOTIFICATION_SETTINGS = "notification_settings"
 TRAY_ACTION_NOTIFICATION_HISTORY = "notification_history"
 TRAY_ACTION_EXIT = "exit"
@@ -27,7 +28,8 @@ TRAY_MENU_ACTIONS = {
     1005: TRAY_ACTION_EVENT_HISTORY,
     1006: TRAY_ACTION_NOTIFICATION_SETTINGS,
     1007: TRAY_ACTION_NOTIFICATION_HISTORY,
-    1008: TRAY_ACTION_EXIT,
+    1008: TRAY_ACTION_AVAILABILITY_REPORT,
+    1009: TRAY_ACTION_EXIT,
 }
 
 
@@ -454,10 +456,11 @@ class WindowsTrayIcon:
             add_item(1003, "Start Auto Refresh", states[TRAY_ACTION_START_AUTO])
             add_item(1004, "Stop Auto Refresh", states[TRAY_ACTION_STOP_AUTO])
             add_item(1005, "Event History")
+            add_item(1008, "Availability Report")
             add_item(1006, "Notification Settings")
             add_item(1007, "Notification History")
             user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-            add_item(1008, "Exit")
+            add_item(1009, "Exit")
 
             point = wintypes.POINT()
             user32.GetCursorPos(ctypes.byref(point))

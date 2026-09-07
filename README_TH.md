@@ -26,6 +26,9 @@
 - Event History แบบถาวรที่แสดงรายการ DOWN และ RECOVERED ใหม่สุดก่อน
 - กรองประวัติตาม Device/Host และ Event Type
 - CSV Export ตามตัวกรองปัจจุบัน และ Clear History พร้อมการยืนยัน
+- สถิติ Availability / Uptime สำหรับวันนี้, 7 วันแบบย้อนหลัง, 30 วันแบบย้อนหลัง และช่วงวันที่กำหนดเอง
+- ค่า Availability และ Coverage พร้อม downtime, จำนวน outage, outage ที่นานที่สุด และ MTTR
+- Outage Details พร้อมส่งออก Summary CSV และ Outage CSV แบบ UTF-8 with BOM
 - Check Selected และ Check All
 - Auto Refresh ที่ไม่ทำงานซ้อนกัน
 - ตรวจสอบในพื้นหลังด้วย worker pool แบบจำกัดขนาด ทำให้ UI ตอบสนองได้ตลอด
@@ -123,7 +126,7 @@ Ping ยังคงเป็นข้อมูลสำหรับวินิ
 
 ไอคอน notification area แบบ native ของ Windows จะเริ่มพร้อมแอปโดยไม่ใช้ runtime dependency ภายนอก เมื่อเริ่มโปรแกรม หน้าต่างหลักจะยังแสดงตามปกติและแอปจะไม่เริ่มแบบซ่อน
 
-เมนู tray มี **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History**, **Notification Settings**, **Notification History** และ **Exit** คำสั่งเหล่านี้ใช้เส้นทางการเฝ้าติดตามและ Auto Refresh เดิม จึงมีรอบตรวจสอบและ Auto Refresh timer เพียงชุดเดียว คำสั่ง History และ Settings จะคืนหน้าต่างหลักและเปิดหรือโฟกัสหน้าต่างที่มีอยู่
+เมนู tray มี **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History**, **Availability Report**, **Notification Settings**, **Notification History** และ **Exit** คำสั่งเหล่านี้ใช้เส้นทางการเฝ้าติดตามและ Auto Refresh เดิม จึงมีรอบตรวจสอบและ Auto Refresh timer เพียงชุดเดียว คำสั่ง Report, History และ Settings จะคืนหน้าต่างหลักและเปิดหรือโฟกัสหน้าต่างที่มีอยู่
 
 - **Hide to Tray** ซ่อนหน้าต่างหลักโดยตั้งใจ ขณะที่การเฝ้าติดตามยังทำงานต่อ
 - **Minimize to tray** เลือกให้การ minimize ปกติเปลี่ยนเป็นการซ่อนได้ โดยค่าเริ่มต้นปิดอยู่
@@ -191,6 +194,34 @@ Date / Time | Device | Host / IP | Port | Event | Ping | Downtime
 
 Event History ใช้ฐานข้อมูล SQLite จาก standard library ชื่อ `events.db` ในโฟลเดอร์แอปที่เขียนได้เดียวกับ config ไฟล์และตารางจะถูกสร้างโดยอัตโนมัติเมื่อใช้ประวัติครั้งแรก และจะไม่ถูกรวมใน EXE ระบบจะเก็บเหตุการณ์ใหม่สุด 10,000 รายการและตัดแถวเก่ากว่าออกหลังการเพิ่มข้อมูล
 
+## Availability Report
+
+เลือก **Availability Report** ในหน้าต่างหลักหรือ System Tray เพื่อคำนวณสถิติ uptime แบบอ่านอย่างเดียวจาก Event History ของ TCP `DOWN` และ `RECOVERED` ที่ยังถูกเก็บไว้ รายงานจัดกลุ่มเป้าหมายด้วย Host + Port จึงไม่รวมบริการคนละ port บน host เดียวกันเข้าด้วยกัน โดยใช้ Device Name ที่ตั้งค่าปัจจุบันก่อน หากไม่มีจึงใช้ชื่อล่าสุดที่ไม่ว่างในประวัติหรือ Host/IP เป้าหมายถาวรที่ตั้งค่าไว้แต่ยังไม่มีหลักฐานสถานะจะแสดง Availability `-`, Coverage `0.00%`, Downtime `-` และ outage เป็นศูนย์ ส่วนแถวชั่วคราวจาก IP Range Scan จะไม่รวมในรายงาน
+
+ช่วงเวลามีความหมายตามเวลาท้องถิ่นดังนี้:
+
+- **Today**: ตั้งแต่เที่ยงคืนท้องถิ่นถึงเวลาปัจจุบัน
+- **7 Days**: 168 ชั่วโมงย้อนหลังจนถึงเวลาปัจจุบัน
+- **30 Days**: 720 ชั่วโมงย้อนหลังจนถึงเวลาปัจจุบัน
+- **Custom**: Start Date และ End Date แบบรวมวันที่ทั้งสองในรูปแบบ `YYYY-MM-DD`; วันที่ในอดีตครอบคลุมเต็มวันตามเวลาท้องถิ่น และช่วงที่จบวันนี้จะหยุดที่เวลาปัจจุบัน ระบบจะปฏิเสธวันที่ไม่ถูกต้อง, วันที่สิ้นสุดก่อนวันที่เริ่ม และช่วงที่ยังไม่เริ่ม
+
+เหตุการณ์ล่าสุดก่อนเริ่มช่วงใช้กำหนดสถานะเริ่มต้น: `DOWN` หมายถึง OFFLINE และ `RECOVERED` หมายถึง ONLINE หากไม่มีหลักฐานก่อนหน้า เวลาก่อนเหตุการณ์แรกที่ยังเก็บไว้จะเป็น UNKNOWN และไม่ถูกสมมติว่าออนไลน์ สถานะที่ทราบจะต่อเนื่องไปจนถึงเหตุการณ์ถัดไปหรือจุดสิ้นสุดรายงาน `DOWN` ซ้ำขณะ offline และ `RECOVERED` ซ้ำขณะ online จะถูกละเว้น ส่วน `RECOVERED` ขณะ unknown จะเริ่มสถานะ online ที่ timestamp นั้น
+
+การคำนวณ metric:
+
+- **Availability %** = known uptime / known duration × 100 โดยไม่ใช้ช่วง UNKNOWN เป็นตัวหาร
+- **Coverage %** = known duration / ระยะเวลารายงานที่ขอ × 100 เพื่อแสดงหลักฐานที่ไม่ครบถ้วนอย่างชัดเจน
+- **Total Downtime**, **Outage Count**, **Longest Outage** และ **Average Outage Duration** ใช้เฉพาะส่วนที่ outage ซ้อนทับกับช่วงรายงาน
+- **MTTR** คือค่าเฉลี่ยระยะเวลาเต็มของ outage ที่ RECOVERED ภายในช่วงรายงาน และแสดง `-` หากยังไม่มี outage ที่เสร็จสิ้นก่อนจุดสิ้นสุดรายงาน
+
+Outage ที่คร่อมขอบช่วงจะถูกตัดให้ตรงช่วงสำหรับการคำนวณ downtime ใน **Outage Details** ยังแสดง timestamp DOWN/RECOVERED จริงที่เก็บไว้ และแยก Actual Duration ออกจาก Period Downtime เหตุการณ์ DOWN ที่ยังไม่มี RECOVERED จะมีสถานะ **ONGOING** และนับถึงจุดสิ้นสุดรายงาน/เวลาปัจจุบันเท่านั้น ช่องค้นหา Device/Host กรองทั้ง summary และรายละเอียด และสามารถเรียงตาม Device, Availability, Downtime และ Outages ได้
+
+**Export Summary CSV** ส่งออกแถว summary ที่ผ่าน filter ปัจจุบัน ส่วน **Export Outages CSV** ส่งออกรายละเอียด outage ที่ผ่าน filter ทั้งสองแบบใช้ UTF-8 พร้อม BOM เพื่อรองรับ Excel และชื่อ Unicode และไม่มีข้อมูล notification หรือ webhook
+
+Availability อ้างอิงสถานะ TCP เท่านั้น ผล Ping เพียงอย่างเดียว, Trace Route, สถานะการส่ง notification, ผล webhook และแถว scan ชั่วคราวไม่มีผล การสร้างรายงานทำงานบน background worker แบบ bounded และไม่แก้ไข Event History, Notification Delivery History, monitoring state, notification หรือ retry
+
+Event History เป็นแหล่งประวัติแหล่งเดียว การล้าง Event History จะลบหลักฐานที่ต้องใช้สร้างรายงานย้อนหลังของช่วงนั้นอย่างถาวร และไม่มีข้อมูลสำรองที่ซ่อนอยู่ เนื่องจากระบบเก็บ Event History ใหม่สุดเพียง 10,000 แถว ความลึกของรายงานจึงจำกัดตาม retention นี้ และช่วงเก่าที่ข้อมูลหายไปจะแสดงเป็น unknown coverage แทนการนับเป็น uptime
+
 ## ข้อกำหนด
 
 - Python 3.9 หรือใหม่กว่าเมื่อรันจาก source
@@ -236,6 +267,7 @@ multi_port_checker.py       Tkinter UI and background task coordination
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
 event_history.py            SQLite Event History and CSV export helpers
+availability_report.py      การสร้างช่วง uptime และ CSV report ที่ไม่ขึ้นกับ UI
 notification_history.py     SQLite delivery history and durable retry state
 windows_tray.py             Native Windows notification-area integration
 notification_models.py      Notification events and backward-compatible settings
@@ -250,6 +282,7 @@ tests/
   test_trace_route_helpers.py Trace command and input-validation tests
   test_monitoring_state.py    Device-record, transition, and duration tests
   test_event_history.py       Event storage, filtering, retention, and CSV tests
+  test_availability_report.py Availability intervals, metrics, filters, and CSV tests
   test_tray_helpers.py        Tray preferences, actions, and lifecycle tests
   test_notification_manager.py Notification settings, transitions, queue, and shutdown tests
   test_notification_history.py Delivery storage, filtering, retention, and recovery tests
@@ -268,9 +301,9 @@ Screenshot สำหรับเอกสารในอนาคตต้อง
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 ```
 
 ## แผนงานในอนาคต
 
-- การกรอง Event History ตามช่วงวันที่
+- ช่วง Maintenance ที่เลือกไม่นำมาคำนวณ Availability ในอนาคต

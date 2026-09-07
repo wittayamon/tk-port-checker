@@ -6,6 +6,7 @@ from unittest.mock import patch
 from windows_tray import (
     ShutdownGuard,
     TRAY_ACTION_CHECK_ALL,
+    TRAY_ACTION_AVAILABILITY_REPORT,
     TRAY_ACTION_EVENT_HISTORY,
     TRAY_ACTION_EXIT,
     TRAY_ACTION_NOTIFICATION_SETTINGS,
@@ -89,6 +90,7 @@ class TrayDecisionTests(unittest.TestCase):
                 TRAY_ACTION_START_AUTO,
                 TRAY_ACTION_STOP_AUTO,
                 TRAY_ACTION_EVENT_HISTORY,
+                TRAY_ACTION_AVAILABILITY_REPORT,
                 TRAY_ACTION_NOTIFICATION_SETTINGS,
                 TRAY_ACTION_NOTIFICATION_HISTORY,
                 TRAY_ACTION_EXIT,
