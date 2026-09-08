@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased — recommended v1.10.0
+
+### Added
+
+- Device Groups / Tags with normalized comma-separated editing, persistent target-list display, and current-config group filtering.
+- Planned Maintenance Mode with manual, 30-minute, 1-hour, 2-hour, 4-hour, and custom local end-time windows.
+- Restart-safe maintenance state, automatic expiry, and persistent `MAINTENANCE_STARTED` / `MAINTENANCE_ENDED` audit events.
+- Maintenance-aware Availability reporting with Raw and Operational Availability, planned maintenance, planned/unplanned downtime, and planned/unplanned/mixed outage classification.
+- Group-aware Availability filtering plus expanded Summary, Outage, and Event History CSV fields.
+
+### Improved
+
+- Operational Availability excludes known monitored time inside persisted planned-maintenance intervals while Raw Availability remains identical to v1.9 behavior.
+- TCP state tracking and DOWN/RECOVERED Event History evidence continue during maintenance, while operational Tk, Windows, Generic Webhook, and Teams notifications are suppressed before enqueue.
+- Timed maintenance expiry continues while hidden in the System Tray and restores safely across restart without duplicate end events or fabricated TCP transitions.
+- Existing durable notification retries remain independent and are never retroactively cancelled by maintenance.
+- Old target configs and Event History databases migrate automatically with safe defaults for missing or malformed optional metadata.
+
 ## v1.9.0 - 2026-09-07
 
 ### Added

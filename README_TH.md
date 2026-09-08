@@ -55,12 +55,29 @@ Device Name เป็นค่าที่ไม่บังคับ ใช้�
 ```json
 {
   "name": "Demo-PLC",
-  "host": "192.168.1.100",
-  "port": 102
+  "host": "192.0.2.10",
+  "port": 102,
+  "groups": ["PLC", "Critical"],
+  "maintenance": {
+    "enabled": true,
+    "started_at": "2026-09-08T10:00:00+07:00",
+    "until": "2026-09-08T11:00:00+07:00",
+    "reason": "Planned maintenance"
+  }
 }
 ```
 
 ระเบียนเดิมที่ไม่มี `name` ยังคงโหลดได้โดยใช้ Device Name เป็นค่าว่าง และไม่ต้องย้ายข้อมูลด้วยตนเอง
+
+## Device Groups / Tags และ Planned Maintenance Mode
+
+กำหนด Groups / Tags แบบคั่นด้วย comma เช่น `PLC, Critical` ได้สูงสุด 10 กลุ่มต่อเป้าหมายและ 32 ตัวอักษรต่อกลุ่ม ระบบตัดช่องว่าง ค่าว่าง และค่าซ้ำแบบไม่สนตัวพิมพ์ กลุ่มเป็น metadata สำหรับจัดระเบียบเท่านั้น ไม่เปลี่ยน identity แบบ Host + Port, Ping/TCP หรือสร้าง monitoring session เพิ่ม ตัวกรอง **Group** มาจากเป้าหมายถาวรเท่านั้น การ monitor และ **Check All** ยังครอบคลุมเป้าหมายถาวรทั้งหมดแม้บางแถวถูกกรอง การกรองกลุ่มในรายงานใช้ config ปัจจุบัน ไม่ได้สร้างประวัติสมาชิกกลุ่มย้อนหลัง
+
+เลือกเป้าหมายถาวรหนึ่งรายการแล้วกด **Start Maintenance** รองรับ Until manually ended, 30 นาที, 1, 2 หรือ 4 ชั่วโมง และ **Custom End Time** ตามเวลาท้องถิ่นที่ผ่าน validation เหตุผลเป็น plain text ไม่เกิน 200 ตัวอักษร ปุ่ม **End Maintenance** ใช้จบช่วงที่ active ส่วนช่วงกำหนดเวลาจะหมดอายุผ่าน Tk scheduler เพียงชุดเดียวซึ่งทำงานต่อเมื่อซ่อนหน้าต่าง manual/future maintenance ถูกคืนค่าหลังเปิดแอปใหม่ และสถานะที่หมดอายุแล้วจะถูกปิดเพียงครั้งเดียว
+
+Maintenance แยกจาก TCP state และไม่ได้แปลว่าเป้าหมาย ONLINE ระบบยังตรวจ Ping/TCP, ใช้ `TcpStateTracker` เดิม และบันทึก DOWN/RECOVERED จริงใน Event History ระหว่าง maintenance ระบบระงับ Tk alert และ notification ใหม่ของ Windows/Generic Webhook/Teams ก่อน enqueue จึงไม่มี Notification Delivery History สำหรับ transition ที่ถูกระงับ แต่ไม่ยกเลิกหรือแก้ไข delivery/retry ที่สร้างก่อนเริ่ม maintenance
+
+Event `MAINTENANCE_STARTED` และ `MAINTENANCE_ENDED` เก็บช่วงย้อนหลัง เหตุผล เวลาจบที่กำหนด และสาเหตุจบแบบ manual/expired หากจบ maintenance ขณะที่ TCP ยัง OFFLINE ระบบจะไม่ reset tracker หรือสร้าง DOWN ซ้ำ และ RECOVERED จริงครั้งถัดไปยังทำงานตามปกติ config เก่าที่ไม่มี `name`, `groups` หรือ `maintenance` โหลดได้ด้วยค่าเริ่มต้นว่าง/ปิด โดยไม่ต้อง migrate เอง
 
 ## IPv4 Range Scan
 
@@ -179,6 +196,8 @@ Delivery History ไม่เก็บ webhook URL, path, query token, Authoriza
 
 ## Event History
 
+Event History บันทึกและกรอง `MAINTENANCE_STARTED` / `MAINTENANCE_ENDED` ด้วย แถว audit เก็บเฉพาะ reason/end metadata ในเครื่อง ส่วน TCP ที่เกิดระหว่าง maintenance ยังคงเป็น DOWN/RECOVERED และมี suppression audit flag ใน CSV ระบบไม่คัดลอก groups ลงทุก event แต่ตัวกรอง Group ใช้สมาชิกจาก config ปัจจุบัน
+
 เลือก **Event History** เพื่อเปิดหน้าต่างแยกที่รองรับ theme และแสดงการเปลี่ยนสถานะ TCP แบบถาวรโดยเรียงรายการใหม่สุดก่อน ผลค่าอ้างอิง (`UNKNOWN -> ONLINE` และ `UNKNOWN -> OFFLINE`) จะไม่ถูกบันทึก สถานะที่ซ้ำกัน, การเปลี่ยนเฉพาะ Ping, ผล Trace Route และเป้าหมายชั่วคราวจาก IP Range Scan จะไม่สร้างประวัติเช่นกัน
 
 ตารางประวัติแสดง:
@@ -195,6 +214,18 @@ Date / Time | Device | Host / IP | Port | Event | Ping | Downtime
 Event History ใช้ฐานข้อมูล SQLite จาก standard library ชื่อ `events.db` ในโฟลเดอร์แอปที่เขียนได้เดียวกับ config ไฟล์และตารางจะถูกสร้างโดยอัตโนมัติเมื่อใช้ประวัติครั้งแรก และจะไม่ถูกรวมใน EXE ระบบจะเก็บเหตุการณ์ใหม่สุด 10,000 รายการและตัดแถวเก่ากว่าออกหลังการเพิ่มข้อมูล
 
 ## Availability Report
+
+รายงานแบบ read-only ใช้ TCP และ maintenance events ที่ยังถูกเก็บใน Event History โดย Host + Port ยังเป็น identity ตัวกรอง Group ใช้สมาชิกกลุ่มจาก config ปัจจุบันและไม่รวมแถว scan ชั่วคราว
+
+- **Raw Availability** คือผล TCP แบบเดิมของ v1.9: known uptime / known duration และไม่เปลี่ยนเพราะ maintenance
+- **Operational Eligible Duration** = known duration ลบ known duration ที่อยู่ใน planned maintenance
+- **Operational Availability** = known uptime นอก maintenance / operational eligible duration และแสดง `-` เมื่อตัวหารเป็นศูนย์
+- **Planned Maintenance** คือ union ของช่วง maintenance ที่บันทึกถาวรและตัดตามช่วงรายงาน รวมทั้งส่วน online, offline และ unknown
+- **Planned Downtime** คือ intersection ของ known TCP downtime, maintenance และช่วงรายงาน
+- **Unplanned Downtime** คือ raw downtime ลบ planned downtime โดย outage แบ่งเป็น `PLANNED`, `UNPLANNED` หรือ `MIXED` และ Outage Details แสดง maintenance overlap
+- **Coverage** ยังคงเป็น known duration / requested duration ช่วง UNKNOWN ระหว่าง maintenance ยังเป็น unknown ไม่กลายเป็น uptime หรือ coverage เพิ่ม
+
+ช่วง maintenance ที่คร่อมขอบรายงานจะถูกตัด ช่วงที่ยัง active จะนับถึง report end และช่วงซ้อนกันจะถูกรวม รายงานย้อนหลังใช้ audit events ที่ persist ไม่พึ่งเฉพาะ flag ใน config ปัจจุบัน Summary CSV เพิ่ม groups, raw/operational availability, planned maintenance และ planned/unplanned downtime ส่วน Outage CSV เพิ่ม overlap, unplanned duration และ classification และ Event CSV รองรับ maintenance event พร้อม audit metadata
 
 เลือก **Availability Report** ในหน้าต่างหลักหรือ System Tray เพื่อคำนวณสถิติ uptime แบบอ่านอย่างเดียวจาก Event History ของ TCP `DOWN` และ `RECOVERED` ที่ยังถูกเก็บไว้ รายงานจัดกลุ่มเป้าหมายด้วย Host + Port จึงไม่รวมบริการคนละ port บน host เดียวกันเข้าด้วยกัน โดยใช้ Device Name ที่ตั้งค่าปัจจุบันก่อน หากไม่มีจึงใช้ชื่อล่าสุดที่ไม่ว่างในประวัติหรือ Host/IP เป้าหมายถาวรที่ตั้งค่าไว้แต่ยังไม่มีหลักฐานสถานะจะแสดง Availability `-`, Coverage `0.00%`, Downtime `-` และ outage เป็นศูนย์ ส่วนแถวชั่วคราวจาก IP Range Scan จะไม่รวมในรายงาน
 
@@ -267,6 +298,7 @@ multi_port_checker.py       Tkinter UI and background task coordination
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
 event_history.py            SQLite Event History and CSV export helpers
+maintenance.py              Group normalization and planned-maintenance helpers
 availability_report.py      การสร้างช่วง uptime และ CSV report ที่ไม่ขึ้นกับ UI
 notification_history.py     SQLite delivery history and durable retry state
 windows_tray.py             Native Windows notification-area integration
@@ -283,6 +315,8 @@ tests/
   test_monitoring_state.py    Device-record, transition, and duration tests
   test_event_history.py       Event storage, filtering, retention, and CSV tests
   test_availability_report.py Availability intervals, metrics, filters, and CSV tests
+  test_device_groups.py       Group normalization, filtering, persistence, and CSV tests
+  test_maintenance_mode.py    Maintenance state, audit, suppression, and report tests
   test_tray_helpers.py        Tray preferences, actions, and lifecycle tests
   test_notification_manager.py Notification settings, transitions, queue, and shutdown tests
   test_notification_history.py Delivery storage, filtering, retention, and recovery tests
@@ -301,9 +335,9 @@ Screenshot สำหรับเอกสารในอนาคตต้อง
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py maintenance.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 ```
 
 ## แผนงานในอนาคต
 
-- ช่วง Maintenance ที่เลือกไม่นำมาคำนวณ Availability ในอนาคต
+- visualization สำหรับรายงานและ Maintenance Overview เพิ่มเติม

@@ -35,11 +35,26 @@ from network_checks import (
 )
 from monitoring_state import (
     EVENT_DOWN,
+    EVENT_MAINTENANCE_ENDED,
+    EVENT_MAINTENANCE_STARTED,
     TcpStateTracker,
     alert_enabled_from_config,
     format_duration,
-    make_host_record,
-    normalize_host_record,
+    make_target_record,
+    normalize_target_record,
+)
+from maintenance import (
+    DURATION_OPTIONS,
+    MANUAL_DURATION,
+    MaintenanceState,
+    current_group_list,
+    filter_operational_alerts,
+    group_matches,
+    is_maintenance_active,
+    maintenance_has_expired,
+    normalize_groups,
+    normalize_maintenance,
+    start_maintenance,
 )
 from notification_manager import NotificationManager
 from notification_history import NotificationHistoryStore
@@ -89,6 +104,9 @@ scan_completed = 0
 scan_show_all = False
 transient_scan_items = set()
 editing_item_id = None
+target_metadata = {}
+target_order = []
+maintenance_after_id = None
 
 network_executor = ThreadPoolExecutor(max_workers=CHECK_WORKERS, thread_name_prefix="network-check")
 trace_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="trace-route")
@@ -121,8 +139,10 @@ EVENT_DB_NAME = "events.db"
 COL_NAME = 0
 COL_HOST = 1
 COL_PORT = 2
-COL_PING = 3
-COL_STATUS = 4
+COL_GROUPS = 3
+COL_PING = 4
+COL_STATUS = 5
+COL_MAINTENANCE = 6
 
 
 # ===================== Helper =====================
@@ -174,6 +194,101 @@ def apply_window_icon(window) -> None:
         pass
 
 
+def all_persistent_items():
+    return [item for item in target_order if item in target_metadata and tree.exists(item)]
+
+
+def all_known_items():
+    items = list(all_persistent_items())
+    items.extend(item for item in transient_scan_items if tree.exists(item) and item not in items)
+    return items
+
+
+def maintenance_state_for(item_id) -> MaintenanceState:
+    return normalize_maintenance(target_metadata.get(item_id, {}).get("maintenance"))
+
+
+def maintenance_display(state: MaintenanceState, now=None) -> str:
+    if not is_maintenance_active(state, now):
+        return "Inactive"
+    if state.until is None:
+        return "Active (manual)"
+    return f"Until {state.until.astimezone():%Y-%m-%d %H:%M}"
+
+
+def insert_persistent_target(record, *, position="end"):
+    clean = normalize_target_record(record)
+    item = tree.insert(
+        "", position,
+        values=(clean["name"], clean["host"], clean["port"],
+                ", ".join(clean["groups"]), "N/A", "Not checked",
+                maintenance_display(normalize_maintenance(clean["maintenance"]))),
+        tags=("unknown",),
+    )
+    target_metadata[item] = {
+        "groups": clean["groups"], "maintenance": clean["maintenance"]
+    }
+    target_order.append(item)
+    return item
+
+
+def configured_target_records():
+    records = []
+    for item in all_persistent_items():
+        values = tree.item(item, "values")
+        metadata = target_metadata[item]
+        records.append(make_target_record(
+            values[COL_NAME], values[COL_HOST], values[COL_PORT],
+            metadata["groups"], metadata["maintenance"],
+        ))
+    return records
+
+
+def refresh_group_choices():
+    groups = current_group_list(configured_target_records())
+    group_filter_combo.configure(values=("All Groups", *groups))
+    if group_filter_var.get() != "All Groups" and not any(
+        group_filter_var.get().casefold() == group.casefold() for group in groups
+    ):
+        group_filter_var.set("All Groups")
+    for history_window in tuple(event_history_windows):
+        if not history_window._closed:
+            history_window.group_combo.configure(values=("All Groups", *groups))
+    for report_window in tuple(availability_report_windows):
+        if not report_window._closed:
+            report_window.group_combo.configure(values=("All Groups", *groups))
+
+
+def configured_groups_by_key():
+    result = {}
+    for item in all_persistent_items():
+        values = tree.item(item, "values")
+        try:
+            key = normalize_target_key(values[COL_HOST], int(values[COL_PORT]))
+        except (TypeError, ValueError):
+            continue
+        result[key] = tuple(target_metadata[item]["groups"])
+    return result
+
+
+def apply_group_filter(_event=None):
+    selected = group_filter_var.get()
+    for item in all_persistent_items():
+        groups = target_metadata[item]["groups"]
+        if group_matches(groups, selected):
+            tree.reattach(item, "", target_order.index(item))
+        else:
+            tree.detach(item)
+    # Scan results are transient and stay visible only in the unfiltered view.
+    for item in tuple(transient_scan_items):
+        if not tree.exists(item):
+            continue
+        if selected == "All Groups":
+            tree.reattach(item, "", "end")
+        else:
+            tree.detach(item)
+
+
 # ===================== Logic: add / remove / update =====================
 
 def add_target():
@@ -181,6 +296,11 @@ def add_target():
     name = entry_name.get().strip()
     host = entry_host.get().strip()
     port_text = entry_port.get().strip()
+    try:
+        groups = normalize_groups(entry_groups.get(), strict=True)
+    except ValueError as exc:
+        messagebox.showwarning("Groups / Tags", str(exc))
+        return
 
     if not host:
         messagebox.showwarning("Input Error", "กรุณาใส่ Host หรือ IP")
@@ -208,15 +328,27 @@ def add_target():
             old_key = None
         ping_text = old_values[COL_PING]
         status_text = old_values[COL_STATUS]
+        previous_state = maintenance_state_for(editing_item_id)
+        new_key = normalize_target_key(host, port)
+        if old_key != new_key and is_maintenance_active(previous_state):
+            end_maintenance_for_item(editing_item_id, end_reason="target edited")
+            previous_state = MaintenanceState()
+        target_metadata[editing_item_id] = {
+            "groups": groups, "maintenance": previous_state.to_config()
+        }
         tree.item(
             editing_item_id,
-            values=(name, host, port, ping_text, status_text),
+            values=(name, host, port, ", ".join(groups), ping_text, status_text,
+                    maintenance_display(previous_state)),
         )
-        if old_key != normalize_target_key(host, port):
+        if old_key != new_key:
             tcp_state_tracker.forget(editing_item_id)
         transient_scan_items.discard(editing_item_id)
         tree.selection_set(editing_item_id)
         finish_editing(clear_entries=False)
+        refresh_group_choices()
+        apply_group_filter()
+        save_config()
         return
 
     existing_item = find_existing_target(host, port)
@@ -231,22 +363,32 @@ def add_target():
                 existing_name,
                 values[COL_HOST],
                 values[COL_PORT],
+                ", ".join(groups),
                 values[COL_PING],
                 values[COL_STATUS],
+                values[COL_MAINTENANCE],
             ),
         )
+        if existing_item not in target_metadata:
+            target_metadata[existing_item] = {
+                "groups": groups, "maintenance": MaintenanceState().to_config()
+            }
+            target_order.append(existing_item)
+        else:
+            target_metadata[existing_item]["groups"] = groups
         transient_scan_items.discard(existing_item)
         tree.selection_set(existing_item)
         tree.focus(existing_item)
         tree.see(existing_item)
+        refresh_group_choices()
+        apply_group_filter()
+        save_config()
         return
 
-    tree.insert(
-        "",
-        "end",
-        values=(name, host, port, "N/A", "Not checked"),
-        tags=("unknown",),
-    )
+    insert_persistent_target(make_target_record(name, host, port, groups))
+    refresh_group_choices()
+    apply_group_filter()
+    save_config()
 
 
 def finish_editing(clear_entries: bool = False):
@@ -255,6 +397,7 @@ def finish_editing(clear_entries: bool = False):
     btn_add.config(text="Add")
     if clear_entries:
         entry_name.delete(0, "end")
+        entry_groups.delete(0, "end")
 
 
 def edit_selected():
@@ -264,13 +407,14 @@ def edit_selected():
         messagebox.showinfo("Edit Selected", "Please select exactly one target to edit.")
         return
     values = tree.item(selected[0], "values")
-    if len(values) < 5:
+    if len(values) < 7 or selected[0] in transient_scan_items:
         return
     editing_item_id = selected[0]
     for entry_widget, value in (
         (entry_name, values[COL_NAME]),
         (entry_host, values[COL_HOST]),
         (entry_port, values[COL_PORT]),
+        (entry_groups, values[COL_GROUPS]),
     ):
         entry_widget.delete(0, "end")
         entry_widget.insert(0, value)
@@ -285,17 +429,25 @@ def remove_selected():
         return
 
     for item in selected:
+        if item in target_metadata and maintenance_state_for(item).enabled:
+            end_maintenance_for_item(item, end_reason="target removed")
         transient_scan_items.discard(item)
+        target_metadata.pop(item, None)
+        if item in target_order:
+            target_order.remove(item)
         tcp_state_tracker.forget(item)
         tree.delete(item)
     if editing_item_id in selected:
         finish_editing(clear_entries=False)
+    refresh_group_choices()
+    apply_group_filter()
+    save_config()
 
 
 def find_existing_target(host: str, port: int, exclude_item=None):
     """Find an existing row by normalized Host/IP + Port."""
     wanted_key = normalize_target_key(host, port)
-    for item_id in tree.get_children():
+    for item_id in all_known_items():
         if item_id == exclude_item:
             continue
         values = tree.item(item_id, "values")
@@ -326,7 +478,7 @@ def update_row_status(
         return None
     values = tree.item(item_id, "values")
     if (
-        len(values) < 5
+        len(values) < 7
         or values[COL_HOST] != host
         or str(values[COL_PORT]) != str(port)
     ):
@@ -336,7 +488,8 @@ def update_row_status(
     tag = "online" if ok else "offline"
     tree.item(
         item_id,
-        values=(values[COL_NAME], host, port, ping_text, status_text),
+        values=(values[COL_NAME], host, port, values[COL_GROUPS], ping_text,
+                status_text, values[COL_MAINTENANCE]),
         tags=(tag,),
     )
     if not track_state:
@@ -352,6 +505,7 @@ def update_row_status(
         "host": host,
         "port": port,
         "ping": ping_text,
+        "maintenance_active": is_maintenance_active(maintenance_state_for(item_id), event.occurred_at),
     }
 
 
@@ -412,6 +566,7 @@ def persist_state_change_events(alerts):
             host=alert["host"],
             port=alert["port"],
             ping=alert["ping"],
+            suppressed_by_maintenance=alert.get("maintenance_active", False),
         )
         inserted = store.insert(event) or inserted
     if inserted:
@@ -423,6 +578,8 @@ def enqueue_state_change_notifications(alerts):
     if not alerts or notification_manager is None:
         return
     for alert in alerts:
+        if alert.get("maintenance_active"):
+            continue
         event = NotificationEvent.from_state_change(
             alert["event"],
             device_name=alert["name"],
@@ -459,8 +616,9 @@ def poll_check_cycle():
         if alert is not None:
             alerts.append(alert)
     persist_state_change_events(alerts)
-    enqueue_state_change_notifications(alerts)
-    show_state_change_alerts(alerts)
+    operational_alerts = filter_operational_alerts(alerts)
+    enqueue_state_change_notifications(operational_alerts)
+    show_state_change_alerts(operational_alerts)
     finish_check_cycle()
 
 
@@ -497,7 +655,7 @@ def start_check_cycle(item_ids) -> bool:
 
 
 def check_all():
-    items = tree.get_children()
+    items = all_persistent_items()
     if not items:
         messagebox.showinfo("Check All", "ยังไม่มีรายการให้เช็ค")
         return
@@ -512,6 +670,176 @@ def check_selected():
         return
 
     start_check_cycle(selected)
+
+
+# ===================== Planned Maintenance =====================
+
+def selected_persistent_item(title="Maintenance"):
+    selected = tree.selection()
+    if len(selected) != 1 or selected[0] in transient_scan_items:
+        messagebox.showinfo(title, "Please select exactly one persistent target.")
+        return None
+    return selected[0]
+
+
+def persist_maintenance_event(item_id, event_type, *, state, end_reason="", occurred_at=None):
+    if not tree.exists(item_id):
+        return False
+    values = tree.item(item_id, "values")
+    event = EventRecord.maintenance_event(
+        event_type,
+        occurred_at=occurred_at or datetime.now().astimezone(),
+        device_name=values[COL_NAME], host=values[COL_HOST], port=int(values[COL_PORT]),
+        reason=state.reason, until=state.until, end_reason=end_reason,
+    )
+    inserted = get_event_history_store().insert(event)
+    if inserted:
+        refresh_event_history_windows()
+        refresh_availability_report_windows()
+    return inserted
+
+
+def set_maintenance_for_item(item_id, state, *, persist=True):
+    target_metadata[item_id]["maintenance"] = state.to_config()
+    values = list(tree.item(item_id, "values"))
+    values[COL_MAINTENANCE] = maintenance_display(state)
+    tree.item(item_id, values=values)
+    if persist:
+        save_config()
+
+
+def begin_maintenance_for_item(item_id, state):
+    if is_maintenance_active(maintenance_state_for(item_id)):
+        raise ValueError("Maintenance is already active for this target.")
+    set_maintenance_for_item(item_id, state, persist=False)
+    persist_maintenance_event(item_id, EVENT_MAINTENANCE_STARTED, state=state,
+                              occurred_at=state.started_at)
+    save_config()
+
+
+def end_maintenance_for_item(item_id, *, end_reason="manual", occurred_at=None):
+    state = maintenance_state_for(item_id)
+    if not state.enabled:
+        return False
+    ended_at = occurred_at or datetime.now().astimezone()
+    set_maintenance_for_item(item_id, MaintenanceState(), persist=False)
+    persist_maintenance_event(item_id, EVENT_MAINTENANCE_ENDED, state=state,
+                              end_reason=end_reason, occurred_at=ended_at)
+    save_config()
+    return True
+
+
+class MaintenanceDialog:
+    def __init__(self, parent, item_id):
+        self.item_id = item_id
+        values = tree.item(item_id, "values")
+        self.window = tk.Toplevel(parent)
+        apply_window_icon(self.window)
+        self.window.title("Start Maintenance")
+        self.window.resizable(False, False)
+        self.frame = tk.Frame(self.window)
+        self.frame.pack(padx=16, pady=14)
+        self.device_label = tk.Label(
+            self.frame, text=f"Device: {values[COL_NAME] or values[COL_HOST]} ({values[COL_HOST]}:{values[COL_PORT]})",
+            anchor="w",
+        )
+        self.device_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        self.duration_label = tk.Label(self.frame, text="Duration:")
+        self.duration_label.grid(row=1, column=0, sticky="w", padx=(0, 8))
+        self.duration_var = tk.StringVar(value=MANUAL_DURATION)
+        self.duration_combo = ttk.Combobox(
+            self.frame, textvariable=self.duration_var, values=DURATION_OPTIONS,
+            state="readonly", width=24, style="Maintenance.TCombobox",
+        )
+        self.duration_combo.grid(row=1, column=1, sticky="ew")
+        self.duration_combo.bind("<<ComboboxSelected>>", self.update_custom_state)
+        self.custom_label = tk.Label(self.frame, text="Custom End:")
+        self.custom_label.grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+        self.custom_var = tk.StringVar(value=datetime.now().astimezone().strftime("%Y-%m-%d %H:%M"))
+        self.custom_entry = tk.Entry(self.frame, textvariable=self.custom_var, width=27)
+        self.custom_entry.grid(row=2, column=1, sticky="ew", pady=(8, 0))
+        self.reason_label = tk.Label(self.frame, text="Reason:")
+        self.reason_label.grid(row=3, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+        self.reason_var = tk.StringVar()
+        self.reason_entry = tk.Entry(self.frame, textvariable=self.reason_var, width=27)
+        self.reason_entry.grid(row=3, column=1, sticky="ew", pady=(8, 0))
+        self.buttons = tk.Frame(self.frame)
+        self.buttons.grid(row=4, column=0, columnspan=2, pady=(14, 0))
+        self.start_button = tk.Button(self.buttons, text="Start", width=12, command=self.submit)
+        self.start_button.grid(row=0, column=0, padx=4)
+        self.cancel_button = tk.Button(self.buttons, text="Cancel", width=12, command=self.window.destroy)
+        self.cancel_button.grid(row=0, column=1, padx=4)
+        self.update_custom_state()
+        self.apply_theme()
+        self.window.transient(parent)
+        self.window.grab_set()
+
+    def update_custom_state(self, _event=None):
+        self.custom_entry.configure(
+            state="normal" if self.duration_var.get() == "Custom End Time" else "disabled"
+        )
+
+    def submit(self):
+        try:
+            state = start_maintenance(
+                self.duration_var.get(), reason=self.reason_var.get(),
+                custom_end=self.custom_var.get(),
+            )
+            begin_maintenance_for_item(self.item_id, state)
+        except ValueError as exc:
+            messagebox.showwarning("Start Maintenance", str(exc), parent=self.window)
+            return
+        self.window.destroy()
+
+    def apply_theme(self):
+        palette = get_theme_palette(current_theme)
+        self.window.configure(bg=palette["bg"])
+        for frame in (self.frame, self.buttons):
+            frame.configure(bg=palette["bg"])
+        for label in (self.device_label, self.duration_label, self.custom_label, self.reason_label):
+            label.configure(bg=palette["bg"], fg=palette["fg"])
+        for entry in (self.custom_entry, self.reason_entry):
+            entry.configure(bg=palette["entry_bg"], fg=palette["entry_fg"], insertbackground=palette["entry_fg"])
+        for button in (self.start_button, self.cancel_button):
+            button.configure(bg=palette["button_bg"], fg=palette["fg"])
+
+
+def start_selected_maintenance():
+    item = selected_persistent_item("Start Maintenance")
+    if item is None:
+        return
+    if is_maintenance_active(maintenance_state_for(item)):
+        messagebox.showinfo("Start Maintenance", "Maintenance is already active for this target.")
+        return
+    MaintenanceDialog(root, item)
+
+
+def end_selected_maintenance():
+    item = selected_persistent_item("End Maintenance")
+    if item is None:
+        return
+    if not is_maintenance_active(maintenance_state_for(item)):
+        messagebox.showinfo("End Maintenance", "Maintenance is not active for this target.")
+        return
+    if messagebox.askyesno("End Maintenance", "End maintenance for the selected target?"):
+        end_maintenance_for_item(item)
+
+
+def poll_maintenance_expiry():
+    global maintenance_after_id
+    maintenance_after_id = None
+    if shutdown_guard.started:
+        return
+    now = datetime.now().astimezone()
+    for item in all_persistent_items():
+        state = maintenance_state_for(item)
+        if maintenance_has_expired(state, now):
+            end_maintenance_for_item(item, end_reason="expired", occurred_at=state.until or now)
+        elif state.enabled:
+            values = list(tree.item(item, "values"))
+            values[COL_MAINTENANCE] = maintenance_display(state, now)
+            tree.item(item, values=values)
+    maintenance_after_id = root.after(15_000, poll_maintenance_expiry)
 
 
 # ===================== Trace Route =====================
@@ -903,26 +1231,37 @@ class EventHistoryWindow:
         self.type_combo = ttk.Combobox(
             self.filter_frame,
             textvariable=self.type_var,
-            values=("All", "DOWN", "RECOVERED"),
+            values=("All", "DOWN", "RECOVERED", "MAINTENANCE_STARTED", "MAINTENANCE_ENDED"),
             state="readonly",
             style="History.TCombobox",
-            width=12,
+            width=23,
         )
         self.type_combo.grid(row=0, column=3, padx=(0, 12))
         self.type_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
 
+        self.group_label = tk.Label(self.filter_frame, text="Group:")
+        self.group_label.grid(row=0, column=4, padx=(0, 5))
+        self.group_var = tk.StringVar(value="All Groups")
+        self.group_combo = ttk.Combobox(
+            self.filter_frame, textvariable=self.group_var,
+            values=("All Groups", *current_group_list(configured_target_records())),
+            state="readonly", style="History.TCombobox", width=16,
+        )
+        self.group_combo.grid(row=0, column=5, padx=(0, 12))
+        self.group_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+
         self.filter_button = tk.Button(
             self.filter_frame, text="Apply Filter", width=12, command=self.refresh
         )
-        self.filter_button.grid(row=0, column=4, padx=(0, 5))
+        self.filter_button.grid(row=0, column=6, padx=(0, 5))
         self.reset_button = tk.Button(
             self.filter_frame, text="Reset", width=10, command=self.reset_filters
         )
-        self.reset_button.grid(row=0, column=5)
+        self.reset_button.grid(row=0, column=7)
 
         self.table_frame = tk.Frame(self.window)
         self.table_frame.pack(fill="both", expand=True, padx=10, pady=5)
-        columns = ("timestamp", "device", "host", "port", "event", "ping", "downtime")
+        columns = ("timestamp", "device", "host", "port", "event", "details", "downtime")
         self.tree = ttk.Treeview(
             self.table_frame,
             columns=columns,
@@ -935,7 +1274,7 @@ class EventHistoryWindow:
             "host": "Host / IP",
             "port": "Port",
             "event": "Event",
-            "ping": "Ping",
+            "details": "Ping / Maintenance Details",
             "downtime": "Downtime",
         }
         widths = {
@@ -943,8 +1282,8 @@ class EventHistoryWindow:
             "device": 145,
             "host": 170,
             "port": 65,
-            "event": 95,
-            "ping": 90,
+            "event": 175,
+            "details": 210,
             "downtime": 95,
         }
         for column in columns:
@@ -952,7 +1291,7 @@ class EventHistoryWindow:
             self.tree.column(
                 column,
                 width=widths[column],
-                anchor="center" if column in ("port", "event", "ping", "downtime") else "w",
+                anchor="center" if column in ("port", "event", "downtime") else "w",
             )
         self.scroll_y = ttk.Scrollbar(
             self.table_frame, orient="vertical", command=self.tree.yview
@@ -996,9 +1335,20 @@ class EventHistoryWindow:
         self.refresh()
 
     def current_events(self):
-        return get_event_history_store().list_events(
+        events = get_event_history_store().list_events(
             self.search_var.get(), self.type_var.get()
         )
+        selected = self.group_var.get()
+        if selected == "All Groups":
+            return events
+        groups_by_key = configured_groups_by_key()
+        return [
+            event for event in events
+            if group_matches(
+                groups_by_key.get(normalize_target_key(event.host, event.port), ()),
+                selected,
+            )
+        ]
 
     def refresh(self):
         if self._closed:
@@ -1023,7 +1373,10 @@ class EventHistoryWindow:
                     event.host,
                     event.port,
                     event.event_type,
-                    event.ping,
+                    event.ping or " | ".join(
+                        part for part in (event.maintenance_reason, event.maintenance_end_reason)
+                        if part
+                    ),
                     downtime,
                 ),
                 tags=(event.event_type.lower(),),
@@ -1036,6 +1389,7 @@ class EventHistoryWindow:
     def reset_filters(self):
         self.search_var.set("")
         self.type_var.set("All")
+        self.group_var.set("All Groups")
         self.refresh()
 
     def export_csv(self):
@@ -1084,7 +1438,7 @@ class EventHistoryWindow:
         self.window.configure(bg=palette["bg"])
         for frame in (self.filter_frame, self.table_frame, self.button_frame):
             frame.configure(bg=palette["bg"])
-        for label in (self.search_label, self.type_label, self.status_label):
+        for label in (self.search_label, self.type_label, self.group_label, self.status_label):
             label.configure(bg=palette["bg"], fg=palette["fg"])
         self.search_entry.configure(
             bg=palette["entry_bg"],
@@ -1130,6 +1484,8 @@ class EventHistoryWindow:
         )
         self.tree.tag_configure("down", foreground="#c62828")
         self.tree.tag_configure("recovered", foreground="#2e7d32")
+        self.tree.tag_configure("maintenance_started", foreground="#b26a00")
+        self.tree.tag_configure("maintenance_ended", foreground="#6a4c00")
 
     def close(self):
         if self._closed:
@@ -1168,12 +1524,13 @@ def open_event_history():
 def configured_report_targets():
     """Snapshot persistent targets on Tk's main thread for report workers."""
     targets = []
-    for item_id in tree.get_children():
-        if item_id in transient_scan_items:
-            continue
+    for item_id in all_persistent_items():
         values = tree.item(item_id, "values")
         try:
-            targets.append(ConfiguredTarget(str(values[COL_NAME]), str(values[COL_HOST]), int(values[COL_PORT])))
+            targets.append(ConfiguredTarget(
+                str(values[COL_NAME]), str(values[COL_HOST]), int(values[COL_PORT]),
+                tuple(target_metadata[item_id]["groups"]),
+            ))
         except (IndexError, TypeError, ValueError):
             continue
     return tuple(targets)
@@ -1190,10 +1547,10 @@ class OutageDetailWindow:
         self._closed = False
         self.frame = tk.Frame(self.window)
         self.frame.pack(fill="both", expand=True, padx=10, pady=10)
-        columns = ("device", "host", "port", "down", "recovered", "duration", "period", "status")
+        columns = ("device", "host", "port", "down", "recovered", "duration", "period", "planned", "unplanned", "class", "status")
         self.tree = ttk.Treeview(self.frame, columns=columns, show="headings", style="Availability.Treeview")
-        headings = ("Device", "Host / IP", "Port", "Down Time", "Recovered Time", "Actual Duration", "Period Downtime", "Status")
-        widths = (145, 160, 60, 165, 165, 105, 110, 90)
+        headings = ("Device", "Host / IP", "Port", "Down Time", "Recovered Time", "Actual Duration", "Total Downtime", "Maintenance Overlap", "Unplanned Downtime", "Classification", "Status")
+        widths = (130, 145, 55, 150, 150, 95, 95, 125, 115, 90, 80)
         for column, heading, width in zip(columns, headings, widths):
             self.tree.heading(column, text=heading)
             self.tree.column(column, width=width, anchor="center" if column in ("port", "duration", "period", "status") else "w")
@@ -1230,7 +1587,10 @@ class OutageDetailWindow:
                 outage.down_at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
                 "-" if outage.recovered_at is None else outage.recovered_at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
                 "-" if outage.actual_duration_seconds is None else format_duration(outage.actual_duration_seconds),
-                format_duration(outage.period_overlap_seconds), outage.status,
+                format_duration(outage.period_overlap_seconds),
+                format_duration(outage.maintenance_overlap_seconds),
+                format_duration(outage.unplanned_downtime_seconds),
+                outage.classification, outage.status,
             ), tags=(outage.status.lower(),))
 
     def export_csv(self):
@@ -1291,6 +1651,7 @@ class AvailabilityReportWindow:
         self.start_var = tk.StringVar(value=today)
         self.end_var = tk.StringVar(value=today)
         self.search_var = tk.StringVar()
+        self.group_var = tk.StringVar(value="All Groups")
         self.controls = tk.Frame(self.window)
         self.controls.pack(fill="x", padx=10, pady=10)
         self.period_label = tk.Label(self.controls, text="Period:")
@@ -1312,6 +1673,15 @@ class AvailabilityReportWindow:
         self.search_entry.grid(row=0, column=7, padx=(0, 8))
         self.refresh_button = tk.Button(self.controls, text="Refresh", width=10, command=self.refresh)
         self.refresh_button.grid(row=0, column=8)
+        self.group_label = tk.Label(self.controls, text="Group:")
+        self.group_label.grid(row=1, column=0, padx=(0, 4), pady=(8, 0))
+        self.group_combo = ttk.Combobox(
+            self.controls, textvariable=self.group_var,
+            values=("All Groups", *current_group_list(configured_target_records())),
+            state="readonly", width=18, style="Availability.TCombobox",
+        )
+        self.group_combo.grid(row=1, column=1, padx=(0, 10), pady=(8, 0))
+        self.group_combo.bind("<<ComboboxSelected>>", lambda _event: self.apply_filter())
         self.search_entry.bind("<Return>", lambda _event: self.apply_filter())
 
         self.kpi_var = tk.StringVar(value="")
@@ -1319,12 +1689,12 @@ class AvailabilityReportWindow:
         self.kpi_label.pack(fill="x", padx=10, pady=(0, 5))
         self.table_frame = tk.Frame(self.window)
         self.table_frame.pack(fill="both", expand=True, padx=10, pady=5)
-        columns = ("device", "host", "port", "availability", "coverage", "downtime", "outages", "longest", "mttr")
-        headings = {"device":"Device", "host":"Host / IP", "port":"Port", "availability":"Availability", "coverage":"Coverage", "downtime":"Downtime", "outages":"Outages", "longest":"Longest Outage", "mttr":"MTTR"}
-        widths = {"device":145, "host":160, "port":60, "availability":95, "coverage":85, "downtime":95, "outages":70, "longest":110, "mttr":90}
+        columns = ("device", "host", "port", "raw", "operational", "coverage", "maintenance", "planned", "unplanned", "outages")
+        headings = {"device":"Device", "host":"Host / IP", "port":"Port", "raw":"Raw Availability", "operational":"Operational Availability", "coverage":"Coverage", "maintenance":"Planned Maintenance", "planned":"Planned Downtime", "unplanned":"Unplanned Downtime", "outages":"Outages"}
+        widths = {"device":130, "host":145, "port":55, "raw":105, "operational":125, "coverage":75, "maintenance":115, "planned":105, "unplanned":115, "outages":65}
         self.tree = ttk.Treeview(self.table_frame, columns=columns, show="headings", style="Availability.Treeview")
         for column in columns:
-            command = (lambda col=column: self.sort_by(col)) if column in ("device", "availability", "downtime", "outages") else None
+            command = (lambda col=column: self.sort_by(col)) if column in ("device", "raw", "operational", "unplanned", "outages") else None
             if command is None:
                 self.tree.heading(column, text=headings[column])
             else:
@@ -1401,7 +1771,7 @@ class AvailabilityReportWindow:
     def apply_filter(self):
         if self.report is None:
             return
-        self.display_rows = filter_report_rows(self.report.rows, self.search_var.get())
+        self.display_rows = filter_report_rows(self.report.rows, self.search_var.get(), self.group_var.get())
         self.display_rows = sort_report_rows(self.display_rows, self.sort_column, self.sort_reverse)
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -1409,20 +1779,23 @@ class AvailabilityReportWindow:
             self.tree.insert("", "end", values=(
                 row.display_name, row.host, row.port,
                 "-" if row.availability_percent is None else f"{row.availability_percent:.2f}%",
+                "-" if row.operational_availability_percent is None else f"{row.operational_availability_percent:.2f}%",
                 f"{row.coverage_percent:.2f}%",
-                "-" if row.known_duration_seconds <= 0 else format_duration(row.downtime_seconds),
-                row.outage_count, format_duration(row.longest_outage_seconds) if row.outage_count else "-",
-                "-" if row.mttr_seconds is None else format_duration(row.mttr_seconds),
+                format_duration(row.planned_maintenance_seconds),
+                format_duration(row.planned_downtime_seconds),
+                format_duration(row.unplanned_downtime_seconds), row.outage_count,
             ))
         known_rows = [row for row in self.display_rows if row.availability_percent is not None]
         average = "-" if not known_rows else f"{sum(row.availability_percent for row in known_rows) / len(known_rows):.2f}%"
-        self.kpi_var.set(f"Monitored Targets: {len(self.display_rows)}    Average Availability: {average}    Total Outages: {sum(row.outage_count for row in self.display_rows)}    Total Downtime: {format_duration(sum(row.downtime_seconds for row in self.display_rows))}")
+        operational_rows = [row for row in self.display_rows if row.operational_availability_percent is not None]
+        operational_average = "-" if not operational_rows else f"{sum(row.operational_availability_percent for row in operational_rows) / len(operational_rows):.2f}%"
+        self.kpi_var.set(f"Targets: {len(self.display_rows)}    Raw Avg: {average}    Operational Avg: {operational_average}    Total Downtime: {format_duration(sum(row.downtime_seconds for row in self.display_rows))}")
         self.status_var.set(f"Showing {len(self.display_rows)} target(s) | {self.report.period_start.astimezone():%Y-%m-%d %H:%M:%S} to {self.report.period_end.astimezone():%Y-%m-%d %H:%M:%S}")
         if self.detail_window is not None:
             self.detail_window.refresh()
 
     def sort_by(self, column):
-        mapped = column
+        mapped = {"raw": "availability"}.get(column, column)
         self.sort_reverse = not self.sort_reverse if self.sort_column == mapped else False
         self.sort_column = mapped
         self.apply_filter()
@@ -1456,7 +1829,7 @@ class AvailabilityReportWindow:
         self.window.configure(bg=palette["bg"])
         for frame in (self.controls, self.table_frame, self.buttons):
             frame.configure(bg=palette["bg"])
-        for label in (self.period_label, self.start_label, self.end_label, self.search_label, self.kpi_label, self.status_label):
+        for label in (self.period_label, self.start_label, self.end_label, self.search_label, self.group_label, self.kpi_label, self.status_label):
             label.configure(bg=palette["bg"], fg=palette["fg"])
         for entry in (self.start_entry, self.end_entry, self.search_entry):
             entry.configure(bg=palette["entry_bg"], fg=palette["entry_fg"], insertbackground=palette["entry_fg"])
@@ -2121,6 +2494,8 @@ def set_scan_controls(running: bool):
     btn_add.config(state="disabled" if running else "normal")
     btn_edit.config(state="disabled" if running else "normal")
     btn_remove.config(state="disabled" if running else "normal")
+    btn_start_maintenance.config(state="disabled" if running else "normal")
+    btn_end_maintenance.config(state="disabled" if running else "normal")
     btn_load.config(state="disabled" if running else "normal")
 
 
@@ -2138,10 +2513,12 @@ def apply_scan_result(host: str, port: int, ping_text: str, port_online: bool):
         item_id = tree.insert(
             "",
             "end",
-            values=("", host, port, ping_text, "Not checked"),
+            values=("", host, port, "", ping_text, "Not checked", "N/A"),
             tags=("unknown",),
         )
         transient_scan_items.add(item_id)
+        if group_filter_var.get() != "All Groups":
+            tree.detach(item_id)
     update_row_status(
         item_id, host, port, ping_text, port_online, track_state=False
     )
@@ -2256,12 +2633,16 @@ def save_host_list():
 
     data = []
     for item in items:
-        name, host, port, _ping, _status = tree.item(item, "values")
+        values = tree.item(item, "values")
+        name, host, port = values[COL_NAME], values[COL_HOST], values[COL_PORT]
         try:
             port_int = int(port)
         except (TypeError, ValueError):
             port_int = port
-        data.append(make_host_record(name, host, port_int))
+        metadata = target_metadata.get(item, {
+            "groups": [], "maintenance": MaintenanceState().to_config()
+        })
+        data.append(make_target_record(name, host, port_int, metadata["groups"], metadata["maintenance"]))
 
     path = filedialog.asksaveasfilename(
         defaultextension=".json",
@@ -2299,43 +2680,36 @@ def load_host_list():
         return
 
     # ล้างของเดิม
+    for item in all_persistent_items():
+        if maintenance_state_for(item).enabled:
+            end_maintenance_for_item(item, end_reason="host list replaced")
     transient_scan_items.clear()
     tcp_state_tracker.clear()
     finish_editing(clear_entries=False)
-    for item in tree.get_children():
+    for item in all_known_items():
         tree.delete(item)
+    target_metadata.clear()
+    target_order.clear()
 
     # เพิ่มใหม่
     for entry in data:
         if not isinstance(entry, dict):
             continue
-        record = normalize_host_record(entry)
+        record = normalize_target_record(entry)
         name, host, port = record["name"], record["host"], record["port"]
         if not host:
             continue
-        tree.insert(
-            "",
-            "end",
-            values=(name, host, port, "N/A", "Not checked"),
-            tags=("unknown",),
-        )
+        insert_persistent_target(record)
+    refresh_group_choices()
+    apply_group_filter()
+    resolve_expired_maintenance_on_startup()
 
 
 # ===================== Config: auto-save theme + hosts =====================
 
 def save_config():
     """บันทึก theme + host list ลงไฟล์ config"""
-    items = tree.get_children()
-    hosts = []
-    for item in items:
-        if item in transient_scan_items:
-            continue
-        name, host, port, _ping, _status = tree.item(item, "values")
-        try:
-            port_int = int(port)
-        except (TypeError, ValueError):
-            port_int = port
-        hosts.append(make_host_record(name, host, port_int))
+    hosts = configured_target_records()
 
     config = {
         "theme": current_theme,
@@ -2390,16 +2764,28 @@ def load_config():
     for entry in hosts:
         if not isinstance(entry, dict):
             continue
-        record = normalize_host_record(entry)
+        record = normalize_target_record(entry)
         name, host, port = record["name"], record["host"], record["port"]
         if not host:
             continue
-        tree.insert(
-            "",
-            "end",
-            values=(name, host, port, "N/A", "Not checked"),
-            tags=("unknown",),
-        )
+        insert_persistent_target(record)
+    refresh_group_choices()
+    apply_group_filter()
+    resolve_expired_maintenance_on_startup()
+
+
+def resolve_expired_maintenance_on_startup():
+    now = datetime.now().astimezone()
+    changed = False
+    for item in all_persistent_items():
+        state = maintenance_state_for(item)
+        if maintenance_has_expired(state, now):
+            end_maintenance_for_item(
+                item, end_reason="expired", occurred_at=state.until or now
+            )
+            changed = True
+    if changed:
+        save_config()
 
 
 # ===================== Windows System Tray / shutdown =====================
@@ -2487,7 +2873,7 @@ def handle_tray_action(action: str) -> None:
     if action == TRAY_ACTION_OPEN:
         restore_main_window()
     elif action == TRAY_ACTION_CHECK_ALL:
-        if not tree.get_children():
+        if not all_persistent_items():
             restore_main_window()
         check_all()
     elif action == TRAY_ACTION_START_AUTO:
@@ -2539,7 +2925,7 @@ def on_close() -> None:
 def shutdown_application() -> bool:
     """Idempotent canonical cleanup used by every real Exit action."""
     global auto_running, tray_poll_after_id, notification_poll_after_id
-    global tray_available, main_window_hidden
+    global tray_available, main_window_hidden, maintenance_after_id
     if not shutdown_guard.begin():
         return False
 
@@ -2562,6 +2948,12 @@ def shutdown_application() -> bool:
         except tk.TclError:
             pass
         notification_poll_after_id = None
+    if maintenance_after_id is not None:
+        try:
+            root.after_cancel(maintenance_after_id)
+        except tk.TclError:
+            pass
+        maintenance_after_id = None
     if notification_manager is not None:
         notification_manager.shutdown(timeout=1.0)
     if scan_running and scan_plan is not None:
@@ -2633,7 +3025,7 @@ def auto_loop():
         auto_after_id = root.after(100, auto_loop)
         return
 
-    items = tree.get_children()
+    items = all_persistent_items()
     if items and start_check_cycle(items):
         return
     schedule_next_auto()
@@ -2720,6 +3112,8 @@ def apply_theme(theme: str):
     # label
     for lbl in (
         lbl_name,
+        lbl_groups,
+        lbl_group_filter,
         lbl_host,
         lbl_port,
         lbl_interval,
@@ -2733,6 +3127,7 @@ def apply_theme(theme: str):
     # entry
     for ent in (
         entry_name,
+        entry_groups,
         entry_host,
         entry_port,
         entry_interval,
@@ -2761,6 +3156,8 @@ def apply_theme(theme: str):
         btn_add,
         btn_edit,
         btn_remove,
+        btn_start_maintenance,
+        btn_end_maintenance,
         btn_check_sel,
         btn_check_all,
         btn_trace,
@@ -2800,6 +3197,11 @@ def apply_theme(theme: str):
     tree.tag_configure("online", background=online_bg, foreground="white")
     tree.tag_configure("offline", background=offline_bg, foreground="white")
     tree.tag_configure("unknown", background=unknown_bg, foreground=fg)
+    style.configure(
+        "Main.TCombobox", fieldbackground=entry_bg, background=button_bg,
+        foreground=entry_fg, arrowcolor=fg,
+    )
+    style.map("Main.TCombobox", fieldbackground=[("readonly", entry_bg)], foreground=[("readonly", entry_fg)])
 
     for trace_window in tuple(trace_windows):
         trace_window.apply_theme(theme)
@@ -2817,7 +3219,7 @@ def apply_theme(theme: str):
 
 root = tk.Tk()
 root.title("Multi Host Port Checker (with Ping)")
-root.geometry("1050x700")
+root.geometry("1220x780")
 root.resizable(False, False)
 apply_window_icon(root)
 
@@ -2854,24 +3256,43 @@ btn_edit.grid(row=0, column=7, padx=(0, 5))
 btn_remove = tk.Button(frame_top, text="Remove Selected", width=15, command=remove_selected)
 btn_remove.grid(row=0, column=8)
 
+lbl_groups = tk.Label(frame_top, text="Groups / Tags:")
+lbl_groups.grid(row=1, column=0, padx=(0, 5), pady=(8, 0))
+entry_groups = tk.Entry(frame_top, width=32)
+entry_groups.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(0, 10), pady=(8, 0))
+
+lbl_group_filter = tk.Label(frame_top, text="Group:")
+lbl_group_filter.grid(row=1, column=3, padx=(0, 5), pady=(8, 0), sticky="e")
+group_filter_var = tk.StringVar(value="All Groups")
+group_filter_combo = ttk.Combobox(
+    frame_top, textvariable=group_filter_var, values=("All Groups",),
+    state="readonly", width=20, style="Main.TCombobox",
+)
+group_filter_combo.grid(row=1, column=4, columnspan=2, sticky="w", pady=(8, 0))
+group_filter_combo.bind("<<ComboboxSelected>>", apply_group_filter)
+
 # ---- ตาราง ----
 frame_table = tk.Frame(root)
 frame_table.pack(pady=5, padx=10, fill="both", expand=True)
 
-columns = ("name", "host", "port", "ping", "status")
+columns = ("name", "host", "port", "groups", "ping", "status", "maintenance")
 tree = ttk.Treeview(frame_table, columns=columns, show="headings", height=14)
 
 tree.heading("name", text="Device Name")
 tree.heading("host", text="Host / IP")
 tree.heading("port", text="Port")
+tree.heading("groups", text="Groups")
 tree.heading("ping", text="Ping (ms)")
 tree.heading("status", text="Status")
+tree.heading("maintenance", text="Maintenance")
 
-tree.column("name", width=190)
-tree.column("host", width=270)
+tree.column("name", width=145)
+tree.column("host", width=190)
 tree.column("port", width=70, anchor="center")
-tree.column("ping", width=100, anchor="center")
-tree.column("status", width=190)
+tree.column("groups", width=190)
+tree.column("ping", width=85, anchor="center")
+tree.column("status", width=130)
+tree.column("maintenance", width=210)
 
 scrollbar_y = ttk.Scrollbar(frame_table, orient="vertical", command=tree.yview)
 tree.configure(yscrollcommand=scrollbar_y.set)
@@ -2949,6 +3370,16 @@ btn_history = tk.Button(
     frame_bottom, text="Event History", width=15, command=open_event_history
 )
 btn_history.grid(row=0, column=3, padx=5)
+
+btn_start_maintenance = tk.Button(
+    frame_bottom, text="Start Maintenance", width=17, command=start_selected_maintenance
+)
+btn_start_maintenance.grid(row=0, column=4, padx=5)
+
+btn_end_maintenance = tk.Button(
+    frame_bottom, text="End Maintenance", width=17, command=end_selected_maintenance
+)
+btn_end_maintenance.grid(row=0, column=5, padx=5)
 
 lbl_interval = tk.Label(frame_bottom, text="Interval (sec):")
 lbl_interval.grid(row=1, column=0, pady=(10, 0))
@@ -3033,5 +3464,6 @@ root.protocol("WM_DELETE_WINDOW", on_close)
 root.bind("<Unmap>", handle_root_unmap, add="+")
 start_tray_support()
 start_notification_support()
+maintenance_after_id = root.after(1_000, poll_maintenance_expiry)
 
 root.mainloop()

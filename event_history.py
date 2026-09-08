@@ -7,11 +7,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable, Optional
 
-from monitoring_state import StateChangeEvent, format_duration
+from monitoring_state import (
+    EVENT_MAINTENANCE_ENDED,
+    EVENT_MAINTENANCE_STARTED,
+    StateChangeEvent,
+    format_duration,
+)
 
 
 DEFAULT_EVENT_RETENTION = 10_000
-EVENT_TYPES = ("DOWN", "RECOVERED")
+EVENT_TYPES = ("DOWN", "RECOVERED", EVENT_MAINTENANCE_STARTED, EVENT_MAINTENANCE_ENDED)
 CSV_COLUMNS = (
     "timestamp",
     "event_type",
@@ -23,6 +28,10 @@ CSV_COLUMNS = (
     "new_status",
     "downtime_seconds",
     "downtime_display",
+    "maintenance_reason",
+    "maintenance_until",
+    "maintenance_end_reason",
+    "suppressed_by_maintenance",
 )
 
 
@@ -37,6 +46,10 @@ class EventRecord:
     previous_status: str
     new_status: str
     downtime_seconds: Optional[float] = None
+    maintenance_reason: str = ""
+    maintenance_until: Optional[str] = None
+    maintenance_end_reason: str = ""
+    suppressed_by_maintenance: bool = False
 
     @classmethod
     def from_state_change(
@@ -47,6 +60,7 @@ class EventRecord:
         host: str,
         port: int,
         ping: str,
+        suppressed_by_maintenance: bool = False,
     ):
         occurred_at = event.occurred_at
         if occurred_at.tzinfo is None:
@@ -61,6 +75,29 @@ class EventRecord:
             previous_status=event.previous_status,
             new_status=event.new_status,
             downtime_seconds=event.downtime_seconds,
+            suppressed_by_maintenance=bool(suppressed_by_maintenance),
+        )
+
+    @classmethod
+    def maintenance_event(
+        cls, event_type: str, *, occurred_at: datetime, device_name: str,
+        host: str, port: int, reason: str = "", until: Optional[datetime] = None,
+        end_reason: str = "",
+    ):
+        if event_type not in (EVENT_MAINTENANCE_STARTED, EVENT_MAINTENANCE_ENDED):
+            raise ValueError("Unsupported maintenance event type.")
+        when = occurred_at.astimezone() if occurred_at.tzinfo is None else occurred_at
+        until_text = None
+        if until is not None:
+            until_value = until.astimezone() if until.tzinfo is None else until
+            until_text = until_value.isoformat(timespec="seconds")
+        return cls(
+            timestamp=when.isoformat(timespec="seconds"), event_type=event_type,
+            device_name=str(device_name or "").strip(), host=str(host).strip(),
+            port=int(port), ping="", previous_status="INACTIVE" if event_type == EVENT_MAINTENANCE_STARTED else "ACTIVE",
+            new_status="ACTIVE" if event_type == EVENT_MAINTENANCE_STARTED else "INACTIVE",
+            maintenance_reason=str(reason or "").strip(), maintenance_until=until_text,
+            maintenance_end_reason=str(end_reason or "").strip(),
         )
 
 
@@ -103,6 +140,20 @@ class EventHistoryStore:
                     )
                     """
                 )
+                existing = {
+                    row[1] for row in connection.execute("PRAGMA table_info(events)")
+                }
+                migrations = {
+                    "maintenance_reason": "TEXT NOT NULL DEFAULT ''",
+                    "maintenance_until": "TEXT",
+                    "maintenance_end_reason": "TEXT NOT NULL DEFAULT ''",
+                    "suppressed_by_maintenance": "INTEGER NOT NULL DEFAULT 0",
+                }
+                for name, declaration in migrations.items():
+                    if name not in existing:
+                        connection.execute(
+                            f"ALTER TABLE events ADD COLUMN {name} {declaration}"
+                        )
             self.available = True
             self.last_error = None
         except (OSError, sqlite3.Error) as exc:
@@ -118,8 +169,10 @@ class EventHistoryStore:
                     """
                     INSERT INTO events (
                         timestamp, event_type, device_name, host, port, ping,
-                        previous_status, new_status, downtime_seconds
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        previous_status, new_status, downtime_seconds,
+                        maintenance_reason, maintenance_until,
+                        maintenance_end_reason, suppressed_by_maintenance
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event.timestamp,
@@ -131,6 +184,10 @@ class EventHistoryStore:
                         event.previous_status,
                         event.new_status,
                         event.downtime_seconds,
+                        event.maintenance_reason,
+                        event.maintenance_until,
+                        event.maintenance_end_reason,
+                        int(event.suppressed_by_maintenance),
                     ),
                 )
                 connection.execute(
@@ -156,9 +213,9 @@ class EventHistoryStore:
         parameters = []
         search_text = str(search or "").strip()
         if search_text:
-            clauses.append("(device_name LIKE ? OR host LIKE ?)")
+            clauses.append("(device_name LIKE ? OR host LIKE ? OR maintenance_reason LIKE ? OR maintenance_end_reason LIKE ?)")
             search_value = f"%{search_text}%"
-            parameters.extend((search_value, search_value))
+            parameters.extend((search_value, search_value, search_value, search_value))
         normalized_type = str(event_type or "All").upper()
         if normalized_type in EVENT_TYPES:
             clauses.append("event_type = ?")
@@ -169,14 +226,16 @@ class EventHistoryStore:
                 rows = connection.execute(
                     """
                     SELECT timestamp, event_type, device_name, host, port, ping,
-                           previous_status, new_status, downtime_seconds
+                           previous_status, new_status, downtime_seconds,
+                           maintenance_reason, maintenance_until,
+                           maintenance_end_reason, suppressed_by_maintenance
                     FROM events
                     """
                     + where_sql
                     + (" ORDER BY id ASC" if oldest_first else " ORDER BY id DESC"),
                     parameters,
                 ).fetchall()
-            return [EventRecord(*row) for row in rows]
+            return [EventRecord(*row[:-1], suppressed_by_maintenance=bool(row[-1])) for row in rows]
         except (OSError, sqlite3.Error) as exc:
             self.last_error = str(exc)
             return []
@@ -218,6 +277,10 @@ def export_events_csv(path: str, events: Iterable[EventRecord]) -> int:
                         if event.downtime_seconds is None
                         else format_duration(event.downtime_seconds)
                     ),
+                    "maintenance_reason": event.maintenance_reason,
+                    "maintenance_until": event.maintenance_until or "",
+                    "maintenance_end_reason": event.maintenance_end_reason,
+                    "suppressed_by_maintenance": "yes" if event.suppressed_by_maintenance else "no",
                 }
             )
     return len(rows)

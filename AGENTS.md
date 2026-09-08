@@ -29,11 +29,13 @@ Main capabilities currently include:
 - PyInstaller EXE build support
 - Custom application icon
 
-Current released version: **v1.8.0**
+Current released version: **v1.9.0**
 
 Current recommended version for Notification Delivery History work: **v1.8.0**
 
 Current recommended version for Availability / Uptime Statistics work: **v1.9.0**
+
+Current recommended version for Device Groups / Planned Maintenance work: **v1.10.0**
 
 ---
 
@@ -339,6 +341,21 @@ Auto Refresh must:
 - Reports are read-only and must not mutate Event History, Notification History, monitoring state, notifications, or retry state
 - Event History retention and clearing directly limit report depth; do not invent hidden historical backup data
 - Keep `README.md` and `README_TH.md` synchronized for all report behavior and preserve public-repository safety in report fixtures, exports, documentation, and diagnostics
+
+## Device Groups and Planned Maintenance Architecture
+
+- Host + Port remains the canonical target identity; groups are organizational metadata only and must not alter Ping, TCP state, Device Name, or monitoring sessions
+- Maintenance state is independent from TCP state, and monitoring must continue throughout maintenance through the existing canonical `TcpStateTracker`
+- Real DOWN / RECOVERED transitions during maintenance must remain persisted in Event History as availability evidence
+- Operational Tk and provider notifications are suppressed while maintenance is active, and suppression must happen before `NotificationManager` enqueue
+- Maintenance must not cancel, rewrite, or otherwise affect delivery/retry rows created before maintenance began
+- Raw Availability must remain unchanged from the TCP-only calculation; Operational Availability excludes only known monitored duration inside persisted planned-maintenance intervals
+- UNKNOWN time never becomes uptime or additional Coverage because of maintenance
+- Historical maintenance reporting must reconstruct persisted `MAINTENANCE_STARTED` / `MAINTENANCE_ENDED` intervals rather than relying only on current config flags
+- Restart expiry must be idempotent and must not create duplicate maintenance-end events or fabricate TCP transitions
+- Do not create a second monitoring engine or reset tracker baselines for maintenance behavior
+- Keep `README.md` and `README_TH.md` synchronized for all group, maintenance, notification-suppression, and reporting behavior
+- Public-repository safety applies to group values, maintenance reasons, tests, exports, documentation, and diagnostics
 
 ---
 

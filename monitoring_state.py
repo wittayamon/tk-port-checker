@@ -2,12 +2,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Hashable, Mapping, Optional
 
+from maintenance import normalize_groups, normalize_maintenance
+
 
 TCP_UNKNOWN = "UNKNOWN"
 TCP_ONLINE = "ONLINE"
 TCP_OFFLINE = "OFFLINE"
 EVENT_DOWN = "DOWN"
 EVENT_RECOVERED = "RECOVERED"
+EVENT_MAINTENANCE_STARTED = "MAINTENANCE_STARTED"
+EVENT_MAINTENANCE_ENDED = "MAINTENANCE_ENDED"
 
 
 def normalize_host_record(record: Mapping) -> dict:
@@ -25,6 +29,20 @@ def make_host_record(name: str, host: str, port) -> dict:
         "host": str(host or "").strip(),
         "port": port,
     }
+
+
+def normalize_target_record(record: Mapping) -> dict:
+    result = normalize_host_record(record)
+    result["groups"] = normalize_groups(record.get("groups", []))
+    result["maintenance"] = normalize_maintenance(record.get("maintenance")).to_config()
+    return result
+
+
+def make_target_record(name: str, host: str, port, groups=(), maintenance=None) -> dict:
+    result = make_host_record(name, host, port)
+    result["groups"] = normalize_groups(groups)
+    result["maintenance"] = normalize_maintenance(maintenance).to_config()
+    return result
 
 
 def alert_enabled_from_config(config: Mapping) -> bool:

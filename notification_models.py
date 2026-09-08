@@ -7,7 +7,7 @@ from typing import Mapping, Optional
 from monitoring_state import StateChangeEvent, format_duration
 
 
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.10.0"
 PROVIDER_WINDOWS = "windows"
 PROVIDER_GENERIC = "generic_webhook"
 PROVIDER_TEAMS = "teams_webhook"

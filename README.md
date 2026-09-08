@@ -19,15 +19,17 @@ The Ping and TCP results are independent: a host can respond to Ping while its c
 
 - Add and remove Host/IP + TCP Port targets
 - Assign an optional Device Name and edit existing targets in place
+- Assign up to 10 Device Groups / Tags and filter persistent targets by group
+- Start manual or timed planned-maintenance windows with optional reasons
 - One-attempt Ping monitoring with latency, `Timeout`, or `Online` fallback
 - Socket-based TCP port checks with color-coded ONLINE/OFFLINE status
 - State Change Alerts for TCP DOWN and RECOVERED transitions with downtime display
 - Persisted State Change Alerts toggle, enabled by default
-- Persistent Event History with newest-first DOWN and RECOVERED records
+- Persistent Event History with DOWN, RECOVERED, MAINTENANCE_STARTED, and MAINTENANCE_ENDED records
 - Device/Host and Event Type history filters
 - Filter-aware CSV Export and confirmed Clear History controls
 - Availability / Uptime Statistics for Today, rolling 7-day, rolling 30-day, and custom date periods
-- Honest Availability and Coverage percentages with downtime, outage, longest-outage, and MTTR metrics
+- Raw and Operational Availability, honest Coverage, and planned/unplanned downtime metrics
 - Outage Details plus Excel-compatible Summary and Outage CSV exports
 - Check Selected and Check All
 - Non-overlapping Auto Refresh
@@ -48,19 +50,34 @@ The Ping and TCP results are independent: a host can respond to Ping while its c
 
 ## Device Names and target data
 
-Device Name is optional and provides a friendly label such as `Demo-PLC`, `NAS-01`, or `Printer-01`. Select one row and choose **Edit Selected** to populate the Device Name, Host/IP, and Port fields; choose **Apply** to update the row without deleting and re-adding it.
+Device Name is optional and provides a friendly label such as `Demo-PLC`, `NAS-01`, or `Printer-01`. Groups are organizational metadata only: they do not change Host + Port identity, Ping/TCP behavior, or create monitoring sessions. Enter comma-separated values such as `PLC, Critical`; whitespace and empty values are removed, duplicates are removed case-insensitively, each value is limited to 32 characters, and each target is limited to 10 groups. The main **Group** filter is built only from persistent targets; monitoring and **Check All** continue for all persistent targets even while rows are filtered. Report group membership reflects the current config, not a historical snapshot.
 
 Newly saved records support the following format:
 
 ```json
 {
   "name": "Demo-PLC",
-  "host": "192.168.1.100",
-  "port": 102
+  "host": "192.0.2.10",
+  "port": 102,
+  "groups": ["PLC", "Critical"],
+  "maintenance": {
+    "enabled": true,
+    "started_at": "2026-09-08T10:00:00+07:00",
+    "until": "2026-09-08T11:00:00+07:00",
+    "reason": "Planned maintenance"
+  }
 }
 ```
 
-Existing records without `name` continue to load with an empty Device Name and require no manual migration.
+Existing records without `name`, `groups`, or `maintenance` continue to load with safe empty/disabled defaults and require no manual migration. Malformed optional metadata is ignored safely.
+
+## Planned Maintenance Mode
+
+Select one persistent target and choose **Start Maintenance**. Available durations are until manually ended, 30 minutes, 1, 2, or 4 hours, and a validated local **Custom End Time**. The optional plain-text reason is limited to 200 characters. **End Maintenance** closes an active window; timed windows expire through one Tk scheduler that continues while the main window is hidden. Active manual/future maintenance is restored after restart, and already-expired state is closed once without fabricating TCP transitions.
+
+Maintenance is independent from TCP state and does not mean ONLINE. Ping and TCP checks continue, the canonical `TcpStateTracker` continues tracking, and real DOWN/RECOVERED evidence remains in Event History. During an active window, Tk state-change dialogs and new Windows/Generic Webhook/Teams operational notifications are suppressed before provider enqueue, so no Notification Delivery History row is created for that transition. Maintenance never cancels or changes delivery/retry rows created before the window.
+
+`MAINTENANCE_STARTED` and `MAINTENANCE_ENDED` audit events persist the historical interval, optional reason, scheduled end, and manual/expired end reason. Ending maintenance while TCP is already OFFLINE does not reset the tracker or fabricate another DOWN; a later real RECOVERED transition is handled normally.
 
 ## IPv4 Range Scan
 
@@ -179,6 +196,8 @@ The newest 20,000 terminal delivery rows are retained. `QUEUED` and `RETRYING` r
 
 ## Event History
 
+Event History also stores and filters `MAINTENANCE_STARTED` / `MAINTENANCE_ENDED`. Maintenance audit rows include only local reason/end metadata; TCP rows occurring during maintenance remain DOWN/RECOVERED and carry a suppression audit flag in CSV. Groups are not copied into every event; the history Group filter resolves current configured membership.
+
 Choose **Event History** to open a separate, themed window containing persistent TCP state changes, newest first. Baseline results (`UNKNOWN -> ONLINE` and `UNKNOWN -> OFFLINE`) are not logged. Repeated states, Ping-only changes, Trace Route results, and transient IP Range Scan discoveries also do not create history records.
 
 The history table displays:
@@ -196,7 +215,17 @@ Event History uses the standard-library SQLite database `events.db` in the same 
 
 ## Availability Report
 
-Choose **Availability Report** in the main window or System Tray to calculate read-only uptime statistics from retained TCP `DOWN` and `RECOVERED` Event History. The report groups each target by Host + Port, so two services on one host remain separate. It displays the current configured Device Name when available, otherwise the newest non-empty recorded name or Host/IP. Configured persistent targets with no state evidence are included with Availability `-`, Coverage `0.00%`, Downtime `-`, and zero outages; transient IP Range Scan rows are excluded.
+Choose **Availability Report** in the main window or System Tray to calculate read-only uptime statistics from retained TCP and maintenance Event History. Host + Port remains the identity. The Group filter uses current configured membership; transient scan rows are excluded.
+
+- **Raw Availability** is the unchanged v1.9 TCP result: known uptime / known duration. Maintenance never changes it.
+- **Operational Eligible Duration** = known duration minus known duration inside planned maintenance.
+- **Operational Availability** = known uptime outside maintenance / operational eligible duration. It displays `-` when eligible duration is zero.
+- **Planned Maintenance** is the clipped union of persisted maintenance intervals, including online, offline, and unknown portions.
+- **Planned Downtime** is the intersection of known TCP downtime, maintenance intervals, and the report period.
+- **Unplanned Downtime** is raw downtime minus planned downtime. Outages are classified `PLANNED`, `UNPLANNED`, or `MIXED`, and Outage Details exposes maintenance overlap.
+- **Coverage** remains known duration / requested duration. UNKNOWN time remains unknown during maintenance and never becomes uptime or inflated coverage.
+
+Maintenance intervals crossing either report boundary are clipped, ongoing windows run through report end, and overlapping intervals are merged. Historical maintenance comes from persisted audit events rather than the current config flag. Summary CSV adds groups, raw/operational availability, planned maintenance, and planned/unplanned downtime; Outage CSV adds overlap, unplanned duration, and classification fields. Event CSV exports both maintenance event types and their audit metadata.
 
 Periods have these exact local-time semantics:
 
@@ -268,6 +297,7 @@ network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
 event_history.py            SQLite Event History and CSV export helpers
 availability_report.py      UI-independent uptime reconstruction and CSV reports
+maintenance.py              Group normalization and planned-maintenance helpers
 notification_history.py     SQLite delivery history and durable retry state
 windows_tray.py             Native Windows notification-area integration
 notification_models.py      Notification events and backward-compatible settings
@@ -283,6 +313,8 @@ tests/
   test_monitoring_state.py    Device-record, transition, and duration tests
   test_event_history.py       Event storage, filtering, retention, and CSV tests
   test_availability_report.py Availability intervals, metrics, filters, and CSV tests
+  test_device_groups.py       Group normalization, filtering, persistence, and CSV tests
+  test_maintenance_mode.py    Maintenance state, audit, suppression, and report tests
   test_tray_helpers.py        Tray preferences, actions, and lifecycle tests
   test_notification_manager.py Notification settings, transitions, queue, and shutdown tests
   test_notification_history.py Delivery storage, filtering, retention, and recovery tests
@@ -301,9 +333,9 @@ Future documentation screenshots must use sanitized fictional data and belong un
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
+python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py maintenance.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 ```
 
 ## Roadmap
 
-- Optional maintenance intervals excluded from future Availability calculations
+- Additional report visualizations and maintenance overview tools
