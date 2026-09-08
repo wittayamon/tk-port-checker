@@ -207,7 +207,7 @@ Date / Time | Device | Host / IP | Port | Event | Ping | Downtime
 ```
 
 - Search by Device Name or Host/IP.
-- Filter Event Type by **All**, **DOWN**, or **RECOVERED**.
+- Filter Event Type by **All**, **DOWN**, **RECOVERED**, **MAINTENANCE_STARTED**, or **MAINTENANCE_ENDED**.
 - **Export CSV** exports the currently filtered rows with timestamp, transition status, raw downtime seconds, and a formatted downtime value. Files use UTF-8 with BOM for Thai and other Unicode names in Microsoft Excel.
 - **Clear History** requires confirmation and deletes only history records; monitored targets, current monitoring state, and settings are unchanged.
 

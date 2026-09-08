@@ -207,7 +207,7 @@ Date / Time | Device | Host / IP | Port | Event | Ping | Downtime
 ```
 
 - ค้นหาด้วย Device Name หรือ Host/IP
-- กรอง Event Type ด้วย **All**, **DOWN** หรือ **RECOVERED**
+- กรอง Event Type ด้วย **All**, **DOWN**, **RECOVERED**, **MAINTENANCE_STARTED** หรือ **MAINTENANCE_ENDED**
 - **Export CSV** ส่งออกแถวตามตัวกรองปัจจุบัน พร้อม timestamp, สถานะก่อน/หลัง, ค่า downtime วินาทีดิบ และค่า downtime ที่จัดรูปแบบแล้ว ไฟล์ใช้ UTF-8 พร้อม BOM เพื่อรองรับชื่อภาษาไทยและ Unicode อื่นใน Microsoft Excel
 - **Clear History** ต้องยืนยันและลบเฉพาระเบียนประวัติ โดยไม่กระทบเป้าหมายที่เฝ้าติดตาม, สถานะการเฝ้าติดตามปัจจุบัน หรือการตั้งค่า
 
