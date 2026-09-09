@@ -393,7 +393,12 @@ def calculate_availability(
     period_end: datetime,
     configured_targets: Iterable[ConfiguredTarget] = (),
 ) -> AvailabilityReport:
-    """Build availability rows without mutating either history store."""
+    """Build availability rows without mutating either history store.
+
+    UNKNOWN intervals never enter the raw or operational denominator. Raw
+    availability remains TCP-only; maintenance subtraction is applied solely to
+    operational eligibility after known state segments are reconstructed.
+    """
     start, end = _aware(period_start), _aware(period_end)
     if start >= end:
         raise ValueError("Report end must be after report start.")

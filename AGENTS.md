@@ -76,7 +76,7 @@ Before modifying the project:
 
 Keep the current release-oriented structure unless a task explicitly authorizes a larger migration:
 
-- Application modules remain at repository root: `multi_port_checker.py`, `network_checks.py`, `monitoring_state.py`, `event_history.py`, `availability_report.py`, `notification_history.py`, `windows_tray.py`, `notification_models.py`, `notification_manager.py`, `windows_notifications.py`, and `webhook_notifications.py`
+- Application modules remain at repository root: `multi_port_checker.py`, `app_version.py`, `application_health.py`, `windows_startup.py`, `network_checks.py`, `monitoring_state.py`, `event_history.py`, `availability_report.py`, `notification_history.py`, `windows_tray.py`, `notification_models.py`, `notification_manager.py`, `windows_notifications.py`, and `webhook_notifications.py`
 - Unit tests live under `tests/`
 - Static application assets live under `assets/`
 - Future sanitized documentation images belong under `docs/images/`
@@ -89,7 +89,7 @@ Canonical verification commands from repository root are:
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
+python -m compileall -q app_version.py application_health.py windows_startup.py multi_port_checker.py network_checks.py monitoring_state.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 pyinstaller --clean --noconfirm MultiPortChecker.spec
 ```
 
@@ -534,6 +534,21 @@ Avoid:
 - Direct Tkinter updates from worker threads
 - Unbounded thread creation
 - Storing runtime Ping/status results in persistent host-list data
+
+## Architecture Comments, Startup, and Diagnostics — REQUIRED
+
+- Add concise comments or docstrings for non-obvious architecture, assumptions, invariants, lifecycle behavior, and recovery paths; explain why the constraint exists rather than restating the code
+- Document Tk/main-thread boundaries and why worker or native callbacks marshal through `root.after()` or the existing main-thread queue
+- Document persistent-state migrations near their implementation, including backward-compatibility and idempotency assumptions
+- Document security-sensitive redaction and secret-exclusion rules near diagnostic, notification, and export implementations
+- Document availability/maintenance interval math, especially clipping, merging, subtraction, UNKNOWN coverage, and Raw-versus-Operational assumptions
+- Avoid redundant line-by-line comments, and update or remove comments whenever behavior changes so comments never become stale
+- Diagnostics exports must remain secret-safe and aggregate-only by default; exclude endpoints, tokens, credentials, full config, Event History contents, and target/device inventory
+- Windows startup registration must remain current-user-only, require no administrator rights, and never use HKLM
+- Source mode must not register a developer Python interpreter or checkout path; real startup registration is for frozen/PyInstaller builds only
+- Health diagnostics must query existing component state and must not create a second monitoring engine or duplicate lifecycle workers
+- Application health must distinguish target OFFLINE/unreachable results from internal monitoring orchestration failure
+- Any periodic Health-window Tk callback must be cancelled when the window closes and during canonical shutdown
 
 ---
 

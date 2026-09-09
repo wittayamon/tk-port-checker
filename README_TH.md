@@ -17,6 +17,8 @@
 
 ## ความสามารถ
 
+- Start with Windows แบบต่อผู้ใช้ และเลือกเริ่มแบบซ่อนใน System Tray ได้
+- หน้าต่าง Health / Diagnostics พร้อมส่งออก JSON ที่คุ้มครองข้อมูลลับ
 - เพิ่มและลบเป้าหมาย Host/IP + TCP Port
 - กำหนด Device Name แบบไม่บังคับและแก้ไขเป้าหมายเดิมได้โดยตรง
 - ตรวจสอบ Ping หนึ่งครั้ง โดยแสดงค่าความหน่วง, `Timeout` หรือค่าสำรอง `Online`
@@ -141,7 +143,7 @@ Ping ยังคงเป็นข้อมูลสำหรับวินิ
 
 ## Windows System Tray
 
-ไอคอน notification area แบบ native ของ Windows จะเริ่มพร้อมแอปโดยไม่ใช้ runtime dependency ภายนอก เมื่อเริ่มโปรแกรม หน้าต่างหลักจะยังแสดงตามปกติและแอปจะไม่เริ่มแบบซ่อน
+ไอคอน notification area แบบ native ของ Windows จะเริ่มพร้อมแอปโดยไม่ใช้ runtime dependency ภายนอก การเปิดโปรแกรมเองตามปกติจะแสดงหน้าต่างหลัก ส่วน EXE ที่ลงทะเบียนผ่าน **Application Settings** สามารถใช้ `--start-hidden` เพื่อเริ่ม lifecycle เดิมครบถ้วนแต่ซ่อนหน้าต่างไว้ใน System Tray
 
 เมนู tray มี **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History**, **Availability Report**, **Notification Settings**, **Notification History** และ **Exit** คำสั่งเหล่านี้ใช้เส้นทางการเฝ้าติดตามและ Auto Refresh เดิม จึงมีรอบตรวจสอบและ Auto Refresh timer เพียงชุดเดียว คำสั่ง Report, History และ Settings จะคืนหน้าต่างหลักและเปิดหรือโฟกัสหน้าต่างที่มีอยู่
 
@@ -154,6 +156,20 @@ Ping ยังคงเป็นข้อมูลสำหรับวินิ
 - ใช้คำสั่ง **Exit** ในเมนู tray เพื่อปิด tray icon, monitoring executor, กระบวนการ Trace Route, หน้าต่าง Event History และแอป Tk อย่างสมบูรณ์
 
 หากเริ่มไอคอน Windows tray ไม่สำเร็จ ปุ่ม Hide to Tray จะถูกปิดใช้งานและปุ่ม X ของหน้าต่างหลักจะออกจากโปรแกรมตามปกติ
+
+## Windows Startup
+
+เปิด **Application Settings** แล้วเลือก **Start MultiPortChecker with Windows** ฟังก์ชันนี้ใช้ได้กับ EXE ที่แพ็กด้วย PyInstaller เท่านั้น และลงทะเบียนเฉพาะผู้ใช้ปัจจุบันที่ `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` จึงไม่ใช้ HKLM และไม่ต้องใช้สิทธิ์ผู้ดูแลระบบ ตัวเลือก **Start hidden in System Tray** จะเพิ่ม `--start-hidden` เฉพาะคำสั่งที่ Windows เรียกตอนเข้าสู่ระบบ การเปิดโปรแกรมเองตามปกติยังคงแสดงหน้าต่างหลัก
+
+เมื่อรันจาก source ระบบจะไม่อนุญาตให้ลงทะเบียน startup เพื่อป้องกันการบันทึก path ของ Python หรือโฟลเดอร์พัฒนาโดยไม่ตั้งใจ หากต้องการปิด ให้ยกเลิก checkbox แล้วบันทึก ระบบจะลบเฉพาะค่า `MultiPortChecker` และไม่แตะ startup entry อื่น
+
+## Health / Diagnostics
+
+เปิด **Health / Diagnostics** จากหน้าหลักหรือ **Application Settings** เพื่อดูสถานะรวม `HEALTHY`, `WARNING`, `ERROR` หรือ `UNKNOWN` snapshot แบบ on-demand แสดงโหมด source/frozen, uptime ของ process, จำนวน target/group, รอบ monitoring ล่าสุดและระยะเวลา, การตรวจ Auto Refresh ที่ค้าง, สถานะ worker แบบ bounded, สุขภาพฐานข้อมูล Event History, worker/queue ของ notification, จำนวน delivery แต่ละสถานะ, maintenance และเวลาหมดอายุที่ใกล้ที่สุด, Availability, System Tray, Windows Startup และผลตรวจ config
+
+Target ที่ OFFLINE หรือเข้าถึงไม่ได้เป็นผล monitoring ปกติ ไม่ใช่ application error เมื่อเปิด Auto Refresh ระบบจะเตือน stale หลังไม่มี batch ที่ทำสำเร็จนานกว่า `max(3 × refresh interval, 60 seconds)` Diagnostics ใช้ state และ executor เดิม ไม่สร้าง monitoring engine เพิ่ม
+
+ปุ่ม **Copy Summary** คัดลอกข้อความสรุป และ **Export Diagnostics** สร้างไฟล์ `MultiPortChecker-Diagnostics-YYYYMMDD-HHMMSS.json` ที่มีเฉพาะข้อมูลรวม โดยไม่ส่งออก webhook/Teams endpoint, token, Authorization header, password, credential, config ทั้งไฟล์, เนื้อหา Event History หรือรายชื่อ target/device
 
 ## Notification Framework
 
@@ -281,6 +297,8 @@ python multi_port_checker.py
 
 ระเบียนเดิมที่มีเฉพาะ `host` และ `port` ยังคงเข้ากันได้และจะโหลดโดยใช้ Device Name เป็นค่าว่าง ค่าความหน่วงของ Ping, สถานะ TCP, timestamp ของการขัดข้อง และผล Trace Route เป็นค่า runtime และจะไม่ถูกบันทึกในระเบียนรายการ Host
 
+`mpc_config.json` เก็บ preference `start_hidden_on_windows_startup` แบบเลือกได้ โดย config เก่าใช้ค่าเริ่มต้น `false` ส่วนสถานะเปิดใช้งาน startup จริงจะอ่านจาก Windows registry เสมอ ไม่อนุมานจาก preference นี้
+
 ## การสร้าง Windows EXE
 
 ติดตั้ง PyInstaller ใน build environment แล้วใช้ spec file ที่ track ไว้:
@@ -295,6 +313,9 @@ pyinstaller --clean --noconfirm MultiPortChecker.spec
 
 ```text
 multi_port_checker.py       Tkinter UI and background task coordination
+app_version.py              เวอร์ชันแอปส่วนกลางสำหรับรุ่นที่ยังไม่เผยแพร่
+application_health.py       health snapshot/export ที่ไม่ขึ้นกับ UI และปกป้องข้อมูลลับ
+windows_startup.py          ตัวช่วยลงทะเบียน startup ต่อผู้ใช้สำหรับ frozen EXE
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
 event_history.py            SQLite Event History and CSV export helpers
@@ -323,6 +344,8 @@ tests/
   test_notification_retry_queue.py Durable/manual retry and localhost integration tests
   test_webhook_notifications.py Local HTTP delivery and payload tests
   test_windows_notifications.py Native notification formatting/provider tests
+  test_windows_startup.py     การทดสอบ registry, command, config และ start-hidden
+  test_application_health.py การทดสอบ health, DB, privacy และ export
 MultiPortChecker.spec       PyInstaller build configuration
 README.md
 README_TH.md
@@ -335,7 +358,7 @@ Screenshot สำหรับเอกสารในอนาคตต้อง
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py maintenance.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
+python -m compileall -q app_version.py application_health.py windows_startup.py multi_port_checker.py network_checks.py monitoring_state.py maintenance.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 ```
 
 ## แผนงานในอนาคต

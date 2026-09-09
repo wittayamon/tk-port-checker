@@ -94,7 +94,11 @@ class ShutdownGuard:
 
 
 class WindowsTrayIcon:
-    """Thin Shell_NotifyIcon wrapper running one native message loop thread."""
+    """Thin Shell_NotifyIcon wrapper running one native message loop thread.
+
+    Native callbacks cross a Windows message-loop boundary and therefore only
+    dispatch symbolic actions; the application queue marshals them back to Tk.
+    """
 
     def __init__(self, icon_path: str, dispatch: Callable[[str], None]):
         self.icon_path = os.path.abspath(icon_path)
@@ -117,6 +121,19 @@ class WindowsTrayIcon:
     def update_state(self, *, auto_running: bool) -> None:
         with self._state_lock:
             self._auto_running = bool(auto_running)
+
+    def health_summary(self) -> dict:
+        """Return stable lifecycle facts without exposing Win32 callback state."""
+        with self._lifecycle_lock:
+            thread = self._thread
+            running = self._running
+            icon_registered = bool(self._hwnd and self._running)
+        return {
+            "thread_alive": bool(thread and thread.is_alive()),
+            "icon_registered": icon_registered,
+            "running": running,
+            "shutdown_requested": bool(thread and not thread.is_alive() and not running),
+        }
 
     def start(self, timeout: float = 5.0) -> bool:
         if sys.platform != "win32":

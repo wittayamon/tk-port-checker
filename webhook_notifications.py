@@ -105,6 +105,7 @@ def teams_webhook_payload(event: NotificationEvent) -> dict:
 
 
 class HttpWebhookProvider:
+    """Bounded stdlib HTTP delivery with endpoint-free result diagnostics."""
     retryable = True
 
     def __init__(self, key: str, display_name: str, endpoint: str, payload_builder):
@@ -124,6 +125,8 @@ class HttpWebhookProvider:
                 error_category="PROVIDER_DISABLED",
                 safe_summary="Provider endpoint is invalid",
             )
+        # The endpoint is used only for the request. Result messages and durable
+        # history receive controlled summaries, never URL/path/query material.
         body = json.dumps(
             self._payload_builder(event), ensure_ascii=False
         ).encode("utf-8")

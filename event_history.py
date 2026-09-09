@@ -102,7 +102,11 @@ class EventRecord:
 
 
 class EventHistoryStore:
-    """Small serialized SQLite store that fails safely when unavailable."""
+    """Small serialized SQLite store that fails safely when unavailable.
+
+    Connections are intentionally short-lived: worker/report reads and Tk-driven
+    writes can share the file without retaining a cross-thread SQLite handle.
+    """
 
     def __init__(self, path: str, retention: int = DEFAULT_EVENT_RETENTION):
         self.path = os.path.abspath(path)
@@ -149,6 +153,8 @@ class EventHistoryStore:
                     "maintenance_end_reason": "TEXT NOT NULL DEFAULT ''",
                     "suppressed_by_maintenance": "INTEGER NOT NULL DEFAULT 0",
                 }
+                # Additive migrations preserve old event databases in place;
+                # maintenance metadata must never rewrite TCP history evidence.
                 for name, declaration in migrations.items():
                     if name not in existing:
                         connection.execute(
@@ -239,6 +245,24 @@ class EventHistoryStore:
         except (OSError, sqlite3.Error) as exc:
             self.last_error = str(exc)
             return []
+
+    def health_summary(self) -> dict:
+        """Run bounded, read-only queries used by Application Diagnostics."""
+        if not self.available:
+            return {"accessible": False, "row_count": 0, "last_event_at": None,
+                    "retention_limit": self.retention}
+        try:
+            with self._lock, self._connection() as connection:
+                connection.execute("SELECT 1").fetchone()
+                row_count, latest = connection.execute(
+                    "SELECT COUNT(*), MAX(timestamp) FROM events"
+                ).fetchone()
+            return {"accessible": True, "row_count": int(row_count),
+                    "last_event_at": latest, "retention_limit": self.retention}
+        except (OSError, sqlite3.Error) as exc:
+            self.last_error = str(exc)
+            return {"accessible": False, "row_count": 0, "last_event_at": None,
+                    "retention_limit": self.retention}
 
     def clear(self) -> bool:
         if not self.available:

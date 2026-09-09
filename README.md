@@ -43,6 +43,8 @@ The Ping and TCP results are independent: a host can respond to Ping while its c
 - Dark and Light themes
 - Native Windows System Tray with background monitoring controls
 - Optional Minimize-to-Tray and persisted Close-to-Tray behavior
+- Optional per-user Start with Windows and Start Hidden startup behavior
+- Health / Diagnostics status view with privacy-safe JSON export
 - Provider-based notifications for Windows, Generic Webhooks, and Microsoft Teams-compatible endpoints
 - Background notification delivery with configurable timeout and retries
 - Persistent Notification Delivery History and bounded durable webhook retries
@@ -141,7 +143,7 @@ Ping remains diagnostic information. A Ping `Timeout` does not cause a DOWN aler
 
 ## Windows System Tray
 
-The native Windows notification-area icon starts with the application without any third-party runtime dependency. Startup still shows the normal main window; the application does not start hidden.
+The native Windows notification-area icon starts with the application without any third-party runtime dependency. Normal manual startup shows the main window. A packaged EXE can instead be registered from **Application Settings** to start with Windows, optionally using `--start-hidden` so the same application lifecycle initializes normally and remains available from the System Tray.
 
 The tray menu provides **Open MultiPortChecker**, **Check All**, **Start Auto Refresh**, **Stop Auto Refresh**, **Event History**, **Availability Report**, **Notification Settings**, **Notification History**, and **Exit**. These actions reuse the existing monitoring and Auto Refresh paths, so only one check cycle and one Auto Refresh timer can run. Report, History, and Settings actions restore the application and open or focus the existing window.
 
@@ -154,6 +156,20 @@ The tray menu provides **Open MultiPortChecker**, **Check All**, **Start Auto Re
 - Use the tray menu's **Exit** command for a guaranteed full shutdown of the tray icon, monitoring executors, Trace Route processes, Event History windows, and Tk application.
 
 If the Windows tray icon cannot be initialized, Hide to Tray is disabled and the main-window X exits normally.
+
+## Windows Startup
+
+Open **Application Settings** and enable **Start MultiPortChecker with Windows**. The packaged EXE registers only the current user under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; administrator rights and HKLM are not used. **Start hidden in System Tray** adds `--start-hidden` to that Windows startup command. It affects Windows startup launches only, so normal manual launches still show the main window.
+
+Startup registration is intentionally unavailable while running from source, preventing a developer Python interpreter or checkout path from being written to startup configuration. Disable the checkbox and save to remove the application value without changing other startup entries.
+
+## Health / Diagnostics
+
+Open **Health / Diagnostics** directly or from **Application Settings** to view overall `HEALTHY`, `WARNING`, `ERROR`, or `UNKNOWN` status. The on-demand snapshot reports application/runtime mode, process uptime, target and group counts, last successful monitoring cycle and duration, stale Auto Refresh detection, bounded network-worker state, Event History database access/count/latest timestamp, notification worker and queue state, delivery status counts, maintenance counts/nearest expiry/scheduler state, Availability worker state, System Tray state, Windows Startup validity, and config validation.
+
+An OFFLINE or unreachable target is a normal monitoring result and does not make application health fail. With Auto Refresh enabled, monitoring becomes stale only after no successful completed batch for `max(3 × refresh interval, 60 seconds)`. Diagnostics reuse current component state and the existing report executor; they do not create another monitoring engine.
+
+Use **Copy Summary** for concise text or **Export Diagnostics** for `MultiPortChecker-Diagnostics-YYYYMMDD-HHMMSS.json`. Default exports contain aggregate operational status only: they exclude webhook/Teams endpoints, tokens, Authorization headers, passwords, credentials, full configuration, Event History contents, and the target/device inventory.
 
 ## Notification Framework
 
@@ -279,6 +295,8 @@ Host lists support Device Name:
 
 Older records containing only `host` and `port` remain compatible and load with an empty Device Name. Ping latency, TCP status, outage timestamps, and Trace Route results are runtime values and are not stored in host-list records.
 
+`mpc_config.json` now stores the optional `start_hidden_on_windows_startup` preference with a safe `false` default for older configs. Actual startup enablement is always read from the Windows registry rather than inferred from that preference.
+
 ## Build a Windows EXE
 
 Install PyInstaller in the build environment, then use the tracked spec file:
@@ -293,6 +311,9 @@ The executable is created at `dist\MultiPortChecker.exe`. The canonical tracked 
 
 ```text
 multi_port_checker.py       Tkinter UI and background task coordination
+app_version.py              Central unreleased application version
+application_health.py       Secret-safe UI-independent health snapshots/export
+windows_startup.py          Per-user frozen-EXE startup registration helpers
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
 monitoring_state.py         Host-record compatibility and TCP state tracking
 event_history.py            SQLite Event History and CSV export helpers
@@ -321,6 +342,8 @@ tests/
   test_notification_retry_queue.py Durable/manual retry and localhost integration tests
   test_webhook_notifications.py Local HTTP delivery and payload tests
   test_windows_notifications.py Native notification formatting/provider tests
+  test_windows_startup.py     Registry, command, config, and start-hidden tests
+  test_application_health.py Health aggregation, DB, privacy, and export tests
 MultiPortChecker.spec       PyInstaller build configuration
 README.md
 README_TH.md
@@ -333,7 +356,7 @@ Future documentation screenshots must use sanitized fictional data and belong un
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q multi_port_checker.py network_checks.py monitoring_state.py maintenance.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
+python -m compileall -q app_version.py application_health.py windows_startup.py multi_port_checker.py network_checks.py monitoring_state.py maintenance.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 ```
 
 ## Roadmap

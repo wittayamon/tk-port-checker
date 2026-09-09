@@ -84,7 +84,11 @@ last_error_category, last_error_summary
 
 
 class NotificationHistoryStore:
-    """Serialized SQLite access for delivery audit rows and durable retry state."""
+    """Serialized SQLite access for delivery audit rows and durable retry state.
+
+    The schema deliberately excludes provider endpoints, headers, payload bodies,
+    and credentials, so both history and diagnostics remain secret-safe.
+    """
 
     def __init__(self, path: str, retention: int = DEFAULT_DELIVERY_RETENTION):
         self.path = os.path.abspath(path)
@@ -270,6 +274,36 @@ class NotificationHistoryStore:
         except (OSError, sqlite3.Error) as exc:
             self.last_error = str(exc)
             return []
+
+    def health_summary(self) -> dict:
+        """Return status counts/latest delivery using read-only aggregate queries."""
+        empty = {status: 0 for status in DELIVERY_STATUSES}
+        if not self.available:
+            return {"accessible": False, "counts": empty,
+                    "last_delivery_at": None, "last_delivery_status": None,
+                    "retention_limit": self.retention}
+        try:
+            with self._lock, self._connection() as connection:
+                connection.execute("SELECT 1").fetchone()
+                rows = connection.execute(
+                    "SELECT status, COUNT(*) FROM notification_deliveries GROUP BY status"
+                ).fetchall()
+                latest_row = connection.execute(
+                    "SELECT status, COALESCE(delivered_at, last_attempt_at, created_at) "
+                    "FROM notification_deliveries ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                latest = latest_row[1] if latest_row else None
+                latest_status = latest_row[0] if latest_row else None
+            counts = dict(empty)
+            counts.update({str(status): int(count) for status, count in rows})
+            return {"accessible": True, "counts": counts,
+                    "last_delivery_at": latest, "last_delivery_status": latest_status,
+                    "retention_limit": self.retention}
+        except (OSError, sqlite3.Error) as exc:
+            self.last_error = str(exc)
+            return {"accessible": False, "counts": empty,
+                    "last_delivery_at": None, "last_delivery_status": None,
+                    "retention_limit": self.retention}
 
     def due_retries(self, now=None, limit: int = 100):
         if not self.available:

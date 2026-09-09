@@ -160,7 +160,11 @@ def maintenance_has_expired(state: MaintenanceState, now: Optional[datetime] = N
 
 
 def expire_maintenance(state: MaintenanceState, now: Optional[datetime] = None):
-    """Return (new state, expired, event time); repeated calls are idempotent."""
+    """Return (new state, expired, event time); repeated calls are idempotent.
+
+    Persisting the disabled replacement before the next scheduler tick prevents
+    restart/timer races from emitting duplicate MAINTENANCE_ENDED evidence.
+    """
     if not maintenance_has_expired(state, now):
         return state, False, None
     return MaintenanceState(), True, state.until

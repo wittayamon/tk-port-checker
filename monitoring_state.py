@@ -82,7 +82,12 @@ class _TargetState:
 
 
 class TcpStateTracker:
-    """Track TCP transitions for persistent targets without any UI dependency."""
+    """Canonical TCP transition state machine for persistent targets.
+
+    Ping never participates here: ICMP reachability and TCP service availability
+    are independent signals.  Initial observations establish a baseline rather
+    than fabricating a DOWN/RECOVERED transition.
+    """
 
     def __init__(self):
         self._states = {}

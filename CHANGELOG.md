@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased — recommended v1.11.0
+
+### Added
+
+- Per-user **Start with Windows** registration for packaged builds, with optional **Start hidden in System Tray** behavior through `--start-hidden`.
+- Themed **Application Settings** and **Health / Diagnostics** windows.
+- Secret-safe aggregate diagnostics JSON export and clipboard summary.
+- Monitoring-cycle timestamps, completion duration, and stale Auto Refresh health detection.
+- Read-only Event History, Notification Delivery History, notification worker, maintenance scheduler, tray, startup, Availability, and config health reporting.
+
+### Improved
+
+- Centralized the unreleased application version as `1.11.0-dev`.
+- Added architecture documentation around lifecycle, Tk/thread boundaries, persistence migrations, durable retries, maintenance suppression, availability interval assumptions, Windows APIs, resource paths, and diagnostic redaction.
+- Expanded automated regression coverage for startup registration, hidden startup, health aggregation, database health, and diagnostics privacy.
+
 ## v1.10.0 - 2026-09-08
 
 ### Added

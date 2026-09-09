@@ -72,6 +72,8 @@ class NotificationManager:
         self._accepting = True
         self._shutdown_started = False
         self._startup_recovered = False
+        self._last_successful_delivery_at = None
+        self._last_failure_at = None
         self._thread = threading.Thread(target=self._worker, name="notification-worker", daemon=True)
         self._scheduler_thread = threading.Thread(
             target=self._scheduler, name="notification-retry-scheduler", daemon=True
@@ -82,6 +84,29 @@ class NotificationManager:
     @property
     def worker_alive(self) -> bool:
         return self._thread.is_alive() or self._scheduler_thread.is_alive()
+
+    def health_summary(self) -> dict:
+        """Expose lifecycle counters only; provider config/payloads stay private."""
+        with self._lifecycle_lock:
+            accepting = self._accepting
+            shutdown_started = self._shutdown_started
+        with self._active_lock:
+            active_count = len(self._active_delivery_ids)
+            last_success = self._last_successful_delivery_at
+            last_failure = self._last_failure_at
+        with self._settings_lock:
+            retry_later_enabled = self._settings.retry_later_enabled
+        return {
+            "worker_alive": self._thread.is_alive(),
+            "scheduler_alive": self._scheduler_thread.is_alive(),
+            "queue_size": self._queue.qsize(),
+            "active_delivery_count": active_count,
+            "accepting_jobs": accepting,
+            "shutdown_started": shutdown_started,
+            "retry_later_enabled": retry_later_enabled,
+            "last_successful_delivery_at": last_success,
+            "last_failure_at": last_failure,
+        }
 
     def configure(self, settings: NotificationSettings,
                   providers: Mapping[str, NotificationProvider]) -> None:
@@ -188,6 +213,8 @@ class NotificationManager:
                 return False
         if job.delivery_id is not None:
             with self._active_lock:
+                # Durable retry polling may discover the same row repeatedly;
+                # one in-process delivery ID must map to at most one live job.
                 if job.delivery_id in self._active_delivery_ids:
                     return False
                 self._active_delivery_ids.add(job.delivery_id)
@@ -323,6 +350,12 @@ class NotificationManager:
             self._scheduler_wake.clear()
 
     def _publish(self, result: DeliveryResult) -> None:
+        if not result.test_only:
+            with self._active_lock:
+                if result.success:
+                    self._last_successful_delivery_at = self._clock()
+                else:
+                    self._last_failure_at = self._clock()
         if self._result_callback is not None:
             try:
                 self._result_callback(result)
@@ -347,6 +380,7 @@ class NotificationManager:
         )) and done.wait(timeout)
 
     def shutdown(self, timeout: float = 1.0) -> bool:
+        """Stop admission first, preserve queued durable work, then join workers."""
         with self._lifecycle_lock:
             if self._shutdown_started:
                 return False

@@ -5,10 +5,28 @@ import locale
 import queue
 import subprocess
 import threading
+import time
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from tkinter import ttk, messagebox, filedialog
+
+from app_version import APP_VERSION
+from application_health import (
+    ERROR as HEALTH_ERROR,
+    HEALTHY as HEALTH_HEALTHY,
+    WARNING as HEALTH_WARNING,
+    ComponentHealth,
+    application_component,
+    build_snapshot,
+    export_diagnostics_json,
+    format_age,
+    maintenance_component,
+    monitoring_component,
+    notification_component,
+    simple_component,
+    store_component,
+)
 
 from availability_report import (
     ConfiguredTarget,
@@ -89,6 +107,14 @@ from windows_tray import (
     tray_icon_relative_path,
     tray_preferences_from_config,
 )
+from windows_startup import (
+    apply_start_hidden_window,
+    disable_startup,
+    enable_startup,
+    is_startup_enabled,
+    startup_hidden_from_config,
+    startup_requested_hidden,
+)
 
 # ===================== Global flags =====================
 
@@ -107,6 +133,17 @@ editing_item_id = None
 target_metadata = {}
 target_order = []
 maintenance_after_id = None
+process_started_at = datetime.now().astimezone()
+start_hidden_requested = startup_requested_hidden()
+last_monitor_cycle_started_at = None
+last_monitor_cycle_completed_at = None
+last_successful_monitor_cycle_at = None
+last_monitor_cycle_duration_ms = None
+process_cycle_started_monotonic = None
+last_availability_report_at = None
+last_availability_report_success = None
+config_health_status = HEALTH_HEALTHY
+config_health_summary = "Configuration defaults in use"
 
 network_executor = ThreadPoolExecutor(max_workers=CHECK_WORKERS, thread_name_prefix="network-check")
 trace_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="trace-route")
@@ -116,6 +153,8 @@ event_history_windows = set()
 availability_report_windows = set()
 notification_settings_windows = set()
 notification_history_windows = set()
+application_settings_windows = set()
+health_windows = set()
 tcp_state_tracker = TcpStateTracker()
 event_history_store = None
 notification_history_store = None
@@ -180,6 +219,8 @@ def get_notification_history_store():
 def resource_path(relative_path: str) -> str:
     """ใช้หา path resource ตอน run จาก .py หรือ .exe (อ่าน icon)"""
     try:
+        # PyInstaller extracts bundled read-only assets to _MEIPASS. Runtime
+        # config/SQLite paths use get_app_dir() and must never be written here.
         base_path = sys._MEIPASS  # type: ignore[attr-defined]
     except Exception:
         base_path = os.path.abspath(".")
@@ -578,6 +619,8 @@ def enqueue_state_change_notifications(alerts):
     if not alerts or notification_manager is None:
         return
     for alert in alerts:
+        # Suppress before enqueue so maintenance transitions create no delivery
+        # row; retries created before maintenance remain deliberately untouched.
         if alert.get("maintenance_active"):
             continue
         event = NotificationEvent.from_state_change(
@@ -591,7 +634,14 @@ def enqueue_state_change_notifications(alerts):
 
 
 def finish_check_cycle():
-    global check_in_progress, active_checks
+    global check_in_progress, active_checks, last_monitor_cycle_completed_at
+    global last_successful_monitor_cycle_at, last_monitor_cycle_duration_ms
+    last_monitor_cycle_completed_at = datetime.now().astimezone()
+    last_successful_monitor_cycle_at = last_monitor_cycle_completed_at
+    if process_cycle_started_monotonic is not None:
+        last_monitor_cycle_duration_ms = max(
+            0.0, (time.monotonic() - process_cycle_started_monotonic) * 1000.0
+        )
     check_in_progress = False
     active_checks = []
     btn_check_sel.config(state="normal")
@@ -624,7 +674,8 @@ def poll_check_cycle():
 
 def start_check_cycle(item_ids) -> bool:
     """Capture UI values, then submit a bounded set of background checks."""
-    global check_in_progress, active_checks
+    global check_in_progress, active_checks, last_monitor_cycle_started_at
+    global process_cycle_started_monotonic
     if check_in_progress or scan_running:
         return False
 
@@ -644,6 +695,8 @@ def start_check_cycle(item_ids) -> bool:
         return False
 
     check_in_progress = True
+    last_monitor_cycle_started_at = datetime.now().astimezone()
+    process_cycle_started_monotonic = time.monotonic()
     btn_check_sel.config(state="disabled")
     btn_check_all.config(state="disabled")
     active_checks = [
@@ -1748,6 +1801,7 @@ class AvailabilityReportWindow:
         future.add_done_callback(lambda completed, token=generation: self._result_queue.put((token, completed)))
 
     def _poll_results(self):
+        global last_availability_report_at, last_availability_report_success
         self._poll_after_id = None
         if self._closed:
             return
@@ -1759,9 +1813,13 @@ class AvailabilityReportWindow:
                 try:
                     self.report = future.result()
                 except Exception as exc:
+                    last_availability_report_at = datetime.now().astimezone()
+                    last_availability_report_success = False
                     self.status_var.set("Availability Report is unavailable")
                     messagebox.showerror("Availability Report", f"Unable to calculate report:\n{exc}", parent=self.window)
                 else:
+                    last_availability_report_at = datetime.now().astimezone()
+                    last_availability_report_success = True
                     self.apply_filter()
                 self.refresh_button.configure(state="normal")
         except queue.Empty:
@@ -2483,6 +2541,298 @@ def open_notification_settings():
     return NotificationSettingsWindow(root)
 
 
+# ===================== Application Settings / Health =====================
+
+def _health_capture_from_ui() -> dict:
+    """Capture Tk-owned state on Tk's thread before background DB queries."""
+    try:
+        interval = max(1, int(entry_interval.get().strip()))
+    except (TypeError, ValueError):
+        interval = 5
+    states = [maintenance_state_for(item) for item in all_persistent_items()]
+    return {
+        "now": datetime.now().astimezone(), "interval": interval,
+        "persistent_count": len(all_persistent_items()),
+        "visible_count": len(tree.get_children()),
+        "group_count": len(current_group_list(configured_target_records())),
+        "maintenance_states": states,
+        "network_pending": sum(1 for *_values, future in active_checks if not future.done()),
+        "notification_providers_enabled": bool(notification_settings.enabled_providers()),
+        "start_hidden_preference": bool(start_hidden_on_windows_startup_var.get()),
+    }
+
+
+def _build_runtime_health(captured: dict):
+    """Collect read-only component health without touching any Tk widget."""
+    now = captured["now"]
+    components = [
+        application_component(version=APP_VERSION, frozen=bool(getattr(sys, "frozen", False))),
+        monitoring_component(
+            now=now, auto_refresh=auto_running,
+            refresh_interval_seconds=captured["interval"],
+            last_successful_at=last_successful_monitor_cycle_at,
+            last_duration_ms=last_monitor_cycle_duration_ms,
+            persistent_count=captured["persistent_count"],
+            visible_count=captured["visible_count"], scan_active=scan_running,
+            last_started_at=last_monitor_cycle_started_at,
+            last_completed_at=last_monitor_cycle_completed_at,
+        ),
+        simple_component(
+            "Network Workers", available=not shutdown_guard.started,
+            summary=f"{captured['network_pending']} pending normal checks",
+            details={"executor_available": not shutdown_guard.started,
+                     "pending_work": captured["network_pending"],
+                     "worker_limit": CHECK_WORKERS}, now=now,
+        ),
+        store_component("Event History", get_event_history_store(), now=now),
+        notification_component(notification_manager,
+            providers_enabled=captured["notification_providers_enabled"], now=now),
+        store_component("Notification Delivery History", get_notification_history_store(),
+                        delivery=True, now=now),
+        maintenance_component(captured["maintenance_states"],
+                              scheduler_active=maintenance_after_id is not None, now=now),
+    ]
+    availability_status = HEALTH_WARNING if last_availability_report_success is False else HEALTH_HEALTHY
+    availability_summary = "Last report generation failed" if last_availability_report_success is False else ("Ready" if last_availability_report_at is None else "Last report completed")
+    components.append(ComponentHealth(
+        "Availability", availability_status, availability_summary,
+        {"last_report_at": last_availability_report_at,
+         "last_report_success": last_availability_report_success,
+         "executor_available": not shutdown_guard.started}, now,
+    ))
+    tray_details = tray_icon.health_summary() if tray_icon is not None else {}
+    components.append(simple_component(
+        "System Tray", available=tray_available,
+        summary="Running" if tray_available else "Unavailable",
+        details=tray_details, now=now,
+    ))
+    startup = is_startup_enabled(start_hidden=captured["start_hidden_preference"])
+    startup_details = {"supported": startup.supported, "enabled": startup.enabled,
+                       "command_valid": startup.command_valid,
+                       "start_hidden_preference": captured["start_hidden_preference"]}
+    if not startup.supported:
+        startup_health = ComponentHealth("Windows Startup", HEALTH_UNKNOWN,
+            "Available only in the packaged Windows application", startup_details, now)
+    elif not startup.success:
+        startup_health = ComponentHealth("Windows Startup", HEALTH_ERROR,
+            "Registry state is inaccessible", startup_details, now)
+    elif startup.enabled and not startup.command_valid:
+        startup_health = ComponentHealth("Windows Startup", HEALTH_WARNING,
+            "Enabled command is stale or invalid", startup_details, now)
+    else:
+        startup_health = ComponentHealth("Windows Startup", HEALTH_HEALTHY,
+            "Enabled" if startup.enabled else "Disabled", startup_details, now)
+    components.extend((startup_health, ComponentHealth(
+        "Configuration", config_health_status, config_health_summary,
+        {"group_count": captured["group_count"], "validation_status": config_health_status}, now,
+    )))
+    return build_snapshot(version=APP_VERSION, process_started_at=process_started_at,
+                          components=components, now=now)
+
+
+class HealthDiagnosticsWindow:
+    """Themed on-demand view which owns no additional monitoring worker."""
+
+    def __init__(self, parent):
+        self.window = tk.Toplevel(parent)
+        self.window.title("Health / Diagnostics")
+        self.window.geometry("760x500")
+        self.window.resizable(True, True)
+        apply_window_icon(self.window)
+        self._closed = False
+        self._future = self._poll_after_id = self._auto_after_id = None
+        self.snapshot = None
+        self.overall_var = tk.StringVar(value="Overall Status: Collecting...")
+        self.uptime_var = tk.StringVar(value="Application Uptime: -")
+        self.cycle_var = tk.StringVar(value="Last Monitoring Cycle: -")
+        self.labels = [tk.Label(self.window, textvariable=self.overall_var, font=("Segoe UI", 12, "bold")),
+                       tk.Label(self.window, textvariable=self.uptime_var),
+                       tk.Label(self.window, textvariable=self.cycle_var)]
+        for label in self.labels:
+            label.pack(anchor="w", padx=12, pady=(8 if label is self.labels[0] else 1, 0))
+        table_frame = tk.Frame(self.window)
+        table_frame.pack(fill="both", expand=True, padx=12, pady=10)
+        self.frames = [table_frame]
+        self.tree = ttk.Treeview(table_frame, columns=("component", "status", "summary"),
+                                 show="headings", style="Health.Treeview")
+        for column, text, width in (("component", "Component", 210), ("status", "Status", 90), ("summary", "Summary", 410)):
+            self.tree.heading(column, text=text)
+            self.tree.column(column, width=width, anchor="w")
+        scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        buttons = tk.Frame(self.window)
+        buttons.pack(pady=(0, 10))
+        self.frames.append(buttons)
+        self.buttons = [tk.Button(buttons, text="Refresh", width=14, command=self.refresh),
+                        tk.Button(buttons, text="Copy Summary", width=14, command=self.copy_summary),
+                        tk.Button(buttons, text="Export Diagnostics", width=18, command=self.export),
+                        tk.Button(buttons, text="Close", width=12, command=self.close)]
+        for index, button in enumerate(self.buttons):
+            button.grid(row=0, column=index, padx=4)
+        health_windows.add(self)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.apply_theme(current_theme)
+        self.refresh()
+
+    def refresh(self):
+        if self._closed or (self._future is not None and not self._future.done()):
+            return
+        if self._auto_after_id is not None:
+            try:
+                self.window.after_cancel(self._auto_after_id)
+            except tk.TclError:
+                pass
+            self._auto_after_id = None
+        # Widgets are captured here; database queries execute on the existing
+        # report executor and return through Tk polling via after().
+        self._future = availability_executor.submit(_build_runtime_health, _health_capture_from_ui())
+        self._poll_after_id = self.window.after(25, self._poll)
+
+    def _poll(self):
+        self._poll_after_id = None
+        if self._closed or self._future is None:
+            return
+        if not self._future.done():
+            self._poll_after_id = self.window.after(25, self._poll)
+            return
+        try:
+            self.snapshot = self._future.result()
+        except Exception:
+            self.overall_var.set("Overall Status: ERROR")
+        else:
+            self._render()
+        self._future = None
+        self._auto_after_id = self.window.after(5_000, self.refresh)
+
+    def _render(self):
+        self.overall_var.set(f"Overall Status: {self.snapshot.overall_status}")
+        self.uptime_var.set(f"Application Uptime: {format_age(self.snapshot.uptime_seconds)}")
+        cycle = "Never" if last_successful_monitor_cycle_at is None else f"{format_age((self.snapshot.generated_at - last_successful_monitor_cycle_at).total_seconds())} ago"
+        self.cycle_var.set(f"Last Monitoring Cycle: {cycle}")
+        for item in self.tree.get_children(): self.tree.delete(item)
+        for component in self.snapshot.components:
+            self.tree.insert("", "end", values=(component.name, component.status, component.summary), tags=(component.status,))
+
+    def copy_summary(self):
+        if self.snapshot is not None:
+            self.window.clipboard_clear()
+            self.window.clipboard_append(self.snapshot.summary_text())
+
+    def export(self):
+        if self.snapshot is None: return
+        path = filedialog.asksaveasfilename(parent=self.window, title="Export Diagnostics",
+            initialfile=f"MultiPortChecker-Diagnostics-{datetime.now():%Y%m%d-%H%M%S}.json",
+            defaultextension=".json", filetypes=(("JSON files", "*.json"),))
+        if not path: return
+        try:
+            export_diagnostics_json(path, self.snapshot)
+        except OSError:
+            messagebox.showerror("Export Diagnostics", "Unable to write the diagnostics file.", parent=self.window)
+        else:
+            messagebox.showinfo("Export Diagnostics", "Diagnostics exported successfully.", parent=self.window)
+
+    def apply_theme(self, theme):
+        palette = get_theme_palette(theme)
+        self.window.configure(bg=palette["bg"])
+        for frame in self.frames: frame.configure(bg=palette["bg"])
+        for label in self.labels: label.configure(bg=palette["bg"], fg=palette["fg"])
+        for button in self.buttons: button.configure(bg=palette["button_bg"], fg=palette["fg"])
+        style = ttk.Style()
+        style.configure("Health.Treeview", background=palette["tree_bg"], foreground=palette["tree_fg"], fieldbackground=palette["tree_bg"])
+        style.configure("Health.Treeview.Heading", background=palette["button_bg"], foreground=palette["fg"])
+        self.tree.tag_configure(HEALTH_ERROR, foreground="#c62828")
+        self.tree.tag_configure(HEALTH_WARNING, foreground="#b26a00")
+        self.tree.tag_configure(HEALTH_HEALTHY, foreground="#2e7d32")
+
+    def close(self):
+        if self._closed: return
+        self._closed = True
+        for after_id in (self._poll_after_id, self._auto_after_id):
+            if after_id is not None:
+                try: self.window.after_cancel(after_id)
+                except tk.TclError: pass
+        health_windows.discard(self)
+        self.window.destroy()
+
+
+def open_health_diagnostics():
+    for health_window in tuple(health_windows):
+        if health_window.window.winfo_exists():
+            health_window.window.deiconify(); health_window.window.lift(); health_window.refresh()
+            return health_window
+    return HealthDiagnosticsWindow(root)
+
+
+class ApplicationSettingsWindow:
+    """Compact lifecycle settings kept separate from notification providers."""
+
+    def __init__(self, parent):
+        self.window = tk.Toplevel(parent)
+        self.window.title("Application Settings")
+        self.window.geometry("470x310")
+        self.window.resizable(False, False)
+        apply_window_icon(self.window)
+        startup = is_startup_enabled(start_hidden=start_hidden_on_windows_startup_var.get())
+        self.startup_var = tk.BooleanVar(value=startup.enabled)
+        self.hidden_var = tk.BooleanVar(value=start_hidden_on_windows_startup_var.get())
+        self.frames, self.labels, self.checks = [], [], []
+        startup_frame = tk.LabelFrame(self.window, text="Startup", padx=10, pady=8)
+        startup_frame.pack(fill="x", padx=12, pady=(12, 6)); self.frames.append(startup_frame)
+        state = "normal" if startup.supported else "disabled"
+        self.startup_check = tk.Checkbutton(startup_frame, text="Start MultiPortChecker with Windows", variable=self.startup_var, state=state)
+        self.hidden_check = tk.Checkbutton(startup_frame, text="Start hidden in System Tray", variable=self.hidden_var, state=state)
+        self.checks.extend((self.startup_check, self.hidden_check))
+        self.startup_check.pack(anchor="w"); self.hidden_check.pack(anchor="w")
+        note_text = "Current-user startup; no administrator rights required." if startup.supported else "Startup registration is available in the packaged Windows application."
+        self.note = tk.Label(startup_frame, text=note_text, anchor="w")
+        self.note.pack(anchor="w", pady=(5, 0)); self.labels.append(self.note)
+        behavior = tk.LabelFrame(self.window, text="Behavior", padx=10, pady=8)
+        behavior.pack(fill="x", padx=12, pady=6); self.frames.append(behavior)
+        self.minimize_check = tk.Checkbutton(behavior, text="Minimize to tray", variable=minimize_to_tray_var)
+        self.close_check = tk.Checkbutton(behavior, text="Close button minimizes to tray", variable=close_to_tray_var)
+        self.checks.extend((self.minimize_check, self.close_check))
+        self.minimize_check.pack(anchor="w"); self.close_check.pack(anchor="w")
+        buttons = tk.Frame(self.window); buttons.pack(pady=10); self.frames.append(buttons)
+        self.buttons = [tk.Button(buttons, text="Health / Diagnostics", width=18, command=open_health_diagnostics),
+                        tk.Button(buttons, text="Save", width=10, command=self.save),
+                        tk.Button(buttons, text="Close", width=10, command=self.close)]
+        for index, button in enumerate(self.buttons): button.grid(row=0, column=index, padx=4)
+        application_settings_windows.add(self)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.apply_theme(current_theme)
+
+    def save(self):
+        global config_health_status, config_health_summary
+        start_hidden_on_windows_startup_var.set(self.hidden_var.get())
+        result = enable_startup(start_hidden=self.hidden_var.get()) if self.startup_var.get() else disable_startup()
+        if result.supported and not result.success:
+            messagebox.showerror("Windows Startup", result.summary, parent=self.window); return
+        save_config()
+        config_health_status, config_health_summary = HEALTH_HEALTHY, "Configuration loaded successfully"
+        messagebox.showinfo("Application Settings", "Settings saved.", parent=self.window)
+
+    def apply_theme(self, theme):
+        palette = get_theme_palette(theme); self.window.configure(bg=palette["bg"])
+        for frame in self.frames:
+            frame.configure(bg=palette["bg"])
+            if isinstance(frame, tk.LabelFrame): frame.configure(fg=palette["fg"])
+        for label in self.labels: label.configure(bg=palette["bg"], fg=palette["fg"])
+        for check in self.checks: check.configure(bg=palette["bg"], fg=palette["fg"], selectcolor=palette["entry_bg"], activebackground=palette["bg"], activeforeground=palette["fg"])
+        for button in self.buttons: button.configure(bg=palette["button_bg"], fg=palette["fg"])
+
+    def close(self):
+        application_settings_windows.discard(self); self.window.destroy()
+
+
+def open_application_settings():
+    for settings in tuple(application_settings_windows):
+        if settings.window.winfo_exists():
+            settings.window.deiconify(); settings.window.lift(); return settings
+    return ApplicationSettingsWindow(root)
+
+
 # ===================== IPv4 Range Scan =====================
 
 def set_scan_controls(running: bool):
@@ -2716,6 +3066,7 @@ def save_config():
         "state_change_alerts": bool(state_change_alerts_var.get()),
         "minimize_to_tray": bool(minimize_to_tray_var.get()),
         "close_to_tray": bool(close_to_tray_var.get()),
+        "start_hidden_on_windows_startup": bool(start_hidden_on_windows_startup_var.get()),
         "hosts": hosts,
     }
     config.update(notification_settings.to_config())
@@ -2730,9 +3081,12 @@ def save_config():
 
 def load_config():
     """อ่าน config ถ้ามี แล้ว set theme + เติม host list ให้"""
-    global current_theme, notification_settings
+    global current_theme, notification_settings, config_health_status
+    global config_health_summary
     path = get_config_path()
     if not os.path.exists(path):
+        config_health_status = HEALTH_HEALTHY
+        config_health_summary = "Configuration file not created; safe defaults loaded"
         return
 
     try:
@@ -2740,26 +3094,41 @@ def load_config():
             config = json.load(f)
     except Exception as e:
         print("Load config error:", e)
+        config_health_status = HEALTH_ERROR
+        config_health_summary = "Configuration file is unreadable; safe defaults loaded"
         return
 
     if not isinstance(config, dict):
         print("Load config error: config root must be a JSON object")
+        config_health_status = HEALTH_ERROR
+        config_health_summary = "Configuration root is invalid; safe defaults loaded"
         return
+
+    normalized = 0
 
     # theme
     theme = config.get("theme")
     if theme in ("light", "dark"):
         current_theme = theme
+    elif theme is not None:
+        normalized += 1
 
     state_change_alerts_var.set(alert_enabled_from_config(config))
     tray_preferences = tray_preferences_from_config(config)
     minimize_to_tray_var.set(tray_preferences.minimize_to_tray)
     close_to_tray_var.set(tray_preferences.close_to_tray)
+    start_hidden_on_windows_startup_var.set(startup_hidden_from_config(config))
+    for key in ("state_change_alerts", "minimize_to_tray", "close_to_tray",
+                "start_hidden_on_windows_startup"):
+        if key in config and not isinstance(config[key], bool):
+            normalized += 1
     notification_settings = notification_settings_from_config(config)
 
     # hosts
     hosts = config.get("hosts", [])
     if not isinstance(hosts, list):
+        config_health_status = HEALTH_WARNING
+        config_health_summary = "Configuration loaded; malformed host list ignored"
         return
     for entry in hosts:
         if not isinstance(entry, dict):
@@ -2772,9 +3141,15 @@ def load_config():
     refresh_group_choices()
     apply_group_filter()
     resolve_expired_maintenance_on_startup()
+    config_health_status = HEALTH_WARNING if normalized else HEALTH_HEALTHY
+    config_health_summary = (
+        f"Configuration loaded; {normalized} malformed optional value(s) normalized"
+        if normalized else "Configuration loaded successfully"
+    )
 
 
 def resolve_expired_maintenance_on_startup():
+    """Close persisted timed windows once without resetting TCP tracker state."""
     now = datetime.now().astimezone()
     changed = False
     for item in all_persistent_items():
@@ -2970,6 +3345,10 @@ def shutdown_application() -> bool:
         settings_window.close()
     for history_window in tuple(notification_history_windows):
         history_window.close()
+    for settings_window in tuple(application_settings_windows):
+        settings_window.close()
+    for health_window in tuple(health_windows):
+        health_window.close()
     save_config()
     if tray_icon is not None:
         tray_icon.stop()
@@ -3173,6 +3552,8 @@ def apply_theme(theme: str):
         btn_hide_tray,
         btn_notifications,
         btn_notification_history,
+        btn_application_settings,
+        btn_health,
     ):
         btn.configure(bg=button_bg, fg=fg, activebackground=button_bg, activeforeground=fg)
 
@@ -3213,13 +3594,17 @@ def apply_theme(theme: str):
         settings_window.apply_theme(theme)
     for history_window in tuple(notification_history_windows):
         history_window.apply_theme(theme)
+    for settings_window in tuple(application_settings_windows):
+        settings_window.apply_theme(theme)
+    for health_window in tuple(health_windows):
+        health_window.apply_theme(theme)
 
 
 # ===================== GUI =====================
 
 root = tk.Tk()
-root.title("Multi Host Port Checker (with Ping)")
-root.geometry("1220x780")
+root.title(f"Multi Host Port Checker (with Ping) - {APP_VERSION}")
+root.geometry("1220x825")
 root.resizable(False, False)
 apply_window_icon(root)
 
@@ -3434,6 +3819,10 @@ chk_close_tray.grid(
     row=3, column=2, columnspan=2, padx=5, pady=(10, 0), sticky="w"
 )
 
+# Registry state is authoritative; this config value controls only whether the
+# registered Windows startup command includes --start-hidden.
+start_hidden_on_windows_startup_var = tk.BooleanVar(value=False)
+
 btn_notifications = tk.Button(
     frame_bottom,
     text="Notification Settings",
@@ -3453,7 +3842,17 @@ btn_notification_history.grid(row=4, column=2, columnspan=2, padx=5, pady=(10, 0
 btn_availability = tk.Button(
     frame_bottom, text="Availability Report", width=20, command=open_availability_report
 )
-btn_availability.grid(row=5, column=0, columnspan=4, padx=5, pady=(10, 0))
+btn_availability.grid(row=5, column=0, columnspan=2, padx=5, pady=(10, 0))
+
+btn_application_settings = tk.Button(
+    frame_bottom, text="Application Settings", width=20, command=open_application_settings
+)
+btn_application_settings.grid(row=5, column=2, columnspan=2, padx=5, pady=(10, 0))
+
+btn_health = tk.Button(
+    frame_bottom, text="Health / Diagnostics", width=20, command=open_health_diagnostics
+)
+btn_health.grid(row=6, column=0, columnspan=4, padx=5, pady=(10, 0))
 
 # โหลด config (theme + hosts) ก่อน apply_theme
 load_config()
@@ -3465,5 +3864,13 @@ root.bind("<Unmap>", handle_root_unmap, add="+")
 start_tray_support()
 start_notification_support()
 maintenance_after_id = root.after(1_000, poll_maintenance_expiry)
+
+# The flag changes only initial presentation; hidden and normal launches share
+# this root, all background services, tray callbacks, and canonical shutdown.
+main_window_hidden = apply_start_hidden_window(
+    root, requested=start_hidden_requested, tray_available=tray_available
+)
+if start_hidden_requested and not main_window_hidden:
+    print("Start hidden requested, but the System Tray is unavailable")
 
 root.mainloop()

@@ -27,6 +27,7 @@ def windows_notification_content(event: NotificationEvent) -> tuple[str, str, bo
 
 
 class WindowsNotificationProvider:
+    """Adapter that queues through the existing tray message-loop boundary."""
     key = PROVIDER_WINDOWS
     display_name = "Windows Notification"
     retryable = False

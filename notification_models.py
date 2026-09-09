@@ -4,10 +4,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Mapping, Optional
 
+from app_version import APP_VERSION
 from monitoring_state import StateChangeEvent, format_duration
 
-
-APP_VERSION = "1.10.0"
 PROVIDER_WINDOWS = "windows"
 PROVIDER_GENERIC = "generic_webhook"
 PROVIDER_TEAMS = "teams_webhook"
