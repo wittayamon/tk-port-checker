@@ -311,7 +311,7 @@ The executable is created at `dist\MultiPortChecker.exe`. The canonical tracked 
 
 ```text
 multi_port_checker.py       Tkinter UI and background task coordination
-app_version.py              Central unreleased application version
+app_version.py              Central application version
 application_health.py       Secret-safe UI-independent health snapshots/export
 windows_startup.py          Per-user frozen-EXE startup registration helpers
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers

@@ -313,7 +313,7 @@ pyinstaller --clean --noconfirm MultiPortChecker.spec
 
 ```text
 multi_port_checker.py       Tkinter UI and background task coordination
-app_version.py              เวอร์ชันแอปส่วนกลางสำหรับรุ่นที่ยังไม่เผยแพร่
+app_version.py              เวอร์ชันแอปส่วนกลาง
 application_health.py       health snapshot/export ที่ไม่ขึ้นกับ UI และปกป้องข้อมูลลับ
 windows_startup.py          ตัวช่วยลงทะเบียน startup ต่อผู้ใช้สำหรับ frozen EXE
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers

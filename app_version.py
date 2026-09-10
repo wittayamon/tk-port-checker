@@ -1,4 +1,3 @@
-"""Single source of truth for the unreleased application version."""
+"""Single source of truth for the application version."""
 
-APP_VERSION = "1.11.0-dev"
-
+APP_VERSION = "1.11.0"

@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased — recommended v1.11.0
+## v1.11.0 - 2026-09-10
 
 ### Added
 
@@ -14,7 +14,7 @@ All notable changes to this project are documented here.
 
 ### Improved
 
-- Centralized the unreleased application version as `1.11.0-dev`.
+- Centralized the application version as `1.11.0`.
 - Added architecture documentation around lifecycle, Tk/thread boundaries, persistence migrations, durable retries, maintenance suppression, availability interval assumptions, Windows APIs, resource paths, and diagnostic redaction.
 - Expanded automated regression coverage for startup registration, hidden startup, health aggregation, database health, and diagnostics privacy.
 
