@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased — recommended v1.12.0
+
+### Added
+
+- Portable Settings Backup JSON with independent backup format version 1 and source app metadata.
+- Application Settings → Backup / Restore Settings, with import preview, conflict counts, selective categories, and Merge / explicitly confirmed Replace modes.
+- Automatic secret-free pre-import safety backups beside the configuration file.
+
+### Improved
+
+- Atomic configuration writes and validate/plan/write/apply restore with rollback on application failure.
+- Bounded UTF-8 import validation (5 MiB, 10,000 targets), existing group normalization, unknown-field warnings, and unsupported-format rejection.
+- Secret-safe portability: endpoints remain local, providers require valid destination endpoints, and startup registry state, SQLite history, retries, and active maintenance are excluded.
+- Comments and tests around portability, maintenance, target identity, Tk application, and persistence failure paths. Development version is `1.12.0-dev`; no release date or tag is finalized.
+
 ## v1.11.0 - 2026-09-10
 
 ### Added

@@ -1,4 +1,5 @@
 import os
+import copy
 import sys
 import json
 import locale
@@ -11,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from tkinter import ttk, messagebox, filedialog
 
+from settings_backup import BackupError, atomic_write_json, plan_restore, save_restore
+from settings_backup_ui import SettingsBackupWindow
 from app_version import APP_VERSION
 from application_health import (
     ERROR as HEALTH_ERROR,
@@ -155,6 +158,7 @@ notification_settings_windows = set()
 notification_history_windows = set()
 application_settings_windows = set()
 health_windows = set()
+backup_windows = set()
 tcp_state_tracker = TcpStateTracker()
 event_history_store = None
 notification_history_store = None
@@ -2771,7 +2775,7 @@ class ApplicationSettingsWindow:
     def __init__(self, parent):
         self.window = tk.Toplevel(parent)
         self.window.title("Application Settings")
-        self.window.geometry("470x310")
+        self.window.geometry("470x355")
         self.window.resizable(False, False)
         apply_window_icon(self.window)
         startup = is_startup_enabled(start_hidden=start_hidden_on_windows_startup_var.get())
@@ -2799,6 +2803,9 @@ class ApplicationSettingsWindow:
                         tk.Button(buttons, text="Save", width=10, command=self.save),
                         tk.Button(buttons, text="Close", width=10, command=self.close)]
         for index, button in enumerate(self.buttons): button.grid(row=0, column=index, padx=4)
+        backup_button = tk.Button(self.window, text="Backup / Restore Settings", command=open_settings_backup)
+        backup_button.pack(pady=4)
+        self.buttons.append(backup_button)
         application_settings_windows.add(self)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.apply_theme(current_theme)
@@ -2809,7 +2816,9 @@ class ApplicationSettingsWindow:
         result = enable_startup(start_hidden=self.hidden_var.get()) if self.startup_var.get() else disable_startup()
         if result.supported and not result.success:
             messagebox.showerror("Windows Startup", result.summary, parent=self.window); return
-        save_config()
+        if not save_config():
+            messagebox.showerror("Application Settings", "Could not save settings. Check configuration folder permissions.", parent=self.window)
+            return
         config_health_status, config_health_summary = HEALTH_HEALTHY, "Configuration loaded successfully"
         messagebox.showinfo("Application Settings", "Settings saved.", parent=self.window)
 
@@ -2824,6 +2833,119 @@ class ApplicationSettingsWindow:
 
     def close(self):
         application_settings_windows.discard(self); self.window.destroy()
+
+
+def apply_restored_config(config, *, restore_targets=True):
+    """Apply only on Tk's main thread, without transition/notification APIs.
+
+Matching row IDs retain their canonical TCP baseline. New IDs begin UNKNOWN.
+SQLite evidence and retry rows are deliberately outside this operation.
+"""
+    global current_theme
+    if restore_targets:
+        existing = {normalize_target_key(tree.item(item, "values")[COL_HOST],
+                    int(tree.item(item, "values")[COL_PORT])): item
+                    for item in all_persistent_items()}
+        retained = []
+        for record in config["hosts"]:
+            key = normalize_target_key(record["host"], record["port"])
+            item = existing.pop(key, None)
+            if item is None:
+                item = insert_persistent_target(record)
+            else:
+                values = list(tree.item(item, "values"))
+                values[COL_NAME] = record["name"]
+                values[COL_GROUPS] = ", ".join(record["groups"])
+                values[COL_MAINTENANCE] = maintenance_display(normalize_maintenance(record["maintenance"]))
+                tree.item(item, values=values)
+                target_metadata[item] = {"groups": record["groups"], "maintenance": record["maintenance"]}
+            retained.append(item)
+        for item in existing.values():
+            tree.delete(item)
+            target_metadata.pop(item, None)
+            tcp_state_tracker.forget(item)
+        target_order[:] = retained
+        finish_editing(clear_entries=False)
+        refresh_group_choices()
+        apply_group_filter()
+    for key, variable in (("state_change_alerts", state_change_alerts_var),
+                          ("minimize_to_tray", minimize_to_tray_var),
+                          ("close_to_tray", close_to_tray_var),
+                          ("start_hidden_on_windows_startup", start_hidden_on_windows_startup_var)):
+        variable.set(config[key])
+    # This preference update must never call enable_startup/disable_startup.
+    for settings_window in tuple(application_settings_windows):
+        settings_window.hidden_var.set(config["start_hidden_on_windows_startup"])
+    apply_notification_settings(notification_settings_from_config(config))
+    current_theme = config["theme"]
+    btn_theme.config(text="Light Mode" if current_theme == "dark" else "Dark Mode")
+    apply_theme(current_theme)
+
+
+def restore_settings_backup(backup, selection, replace_confirmed):
+    global tcp_state_tracker, config_health_status, config_health_summary
+    if check_in_progress or scan_running:
+        raise BackupError("Wait for the current check or scan to finish before importing.")
+    current = snapshot_config()
+    plan = plan_restore(current, backup, **selection)
+    # Keep exact row IDs and tracker state for rollback; no worker may be applying
+    # results during this synchronous Tk transaction. Scheduled Auto resumes later.
+    rows = [(item, tree.item(item)) for item in all_persistent_items()]
+    old_metadata = copy.deepcopy(target_metadata)
+    old_tracker = copy.deepcopy(tcp_state_tracker)
+    save_restore(get_config_path(), current, plan, replace_confirmed=replace_confirmed)
+    try:
+        apply_restored_config(plan.config, restore_targets=selection["targets"])
+    except Exception:
+        # A UI failure after disk commit restores both representations. Report a
+        # rollback-write failure explicitly rather than claiming old disk state.
+        disk_restored = True
+        try:
+            atomic_write_json(get_config_path(), current)
+        except OSError:
+            disk_restored = False
+        try:
+            for item in all_persistent_items():
+                tree.delete(item)
+            target_order.clear()
+            target_metadata.clear()
+            target_metadata.update(old_metadata)
+            for item, options in rows:
+                tree.insert("", "end", iid=item, **options)
+                target_order.append(item)
+            tcp_state_tracker = old_tracker
+            apply_restored_config(current, restore_targets=False)
+            refresh_group_choices()
+            apply_group_filter()
+        except Exception:
+            raise BackupError("Import and live rollback failed. Restart the application and use the pre-import safety backup if needed.") from None
+        if not disk_restored:
+            raise BackupError("Live settings restored, but disk rollback failed. The pre-import safety backup is available in backups.") from None
+        raise BackupError("Import could not be applied; previous settings restored.") from None
+    config_health_status = HEALTH_HEALTHY
+    config_health_summary = "Settings restored successfully"
+    counts = plan.counts
+    categories = []
+    if selection["targets"]:
+        categories.append(f"Targets: {counts['new']} new, {counts['matching']} matching; {counts['names']} names and {counts['groups']} groups changed")
+    if selection["preferences"]:
+        categories.append("Application preferences restored")
+    if selection["notifications"]:
+        categories.append("Notification behavior restored")
+    return "Imported:\n" + "\n".join(categories) + f"\nSkipped: {backup.invalid} invalid, {backup.duplicates} duplicate targets.\nPre-import safety backup created.\nNotification endpoints were not imported.\n" + "\n".join(plan.warnings)
+
+
+def open_settings_backup():
+    for window in tuple(backup_windows):
+        window.window.deiconify()
+        window.window.lift()
+        return window
+    window = SettingsBackupWindow(root, snapshot=snapshot_config,
+        restore=restore_settings_backup, on_close=backup_windows.discard,
+        palette=get_theme_palette, icon=apply_window_icon)
+    backup_windows.add(window)
+    window.apply_theme(current_theme)
+    return window
 
 
 def open_application_settings():
@@ -3057,7 +3179,7 @@ def load_host_list():
 
 # ===================== Config: auto-save theme + hosts =====================
 
-def save_config():
+def snapshot_config():
     """บันทึก theme + host list ลงไฟล์ config"""
     hosts = configured_target_records()
 
@@ -3071,12 +3193,18 @@ def save_config():
     }
     config.update(notification_settings.to_config())
 
+    return config
+
+
+def save_config():
+    """Atomic replacement preserves the previous config if a write fails."""
     try:
-        with open(get_config_path(), "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-    except Exception as e:
+        atomic_write_json(get_config_path(), snapshot_config())
+        return True
+    except (OSError, ValueError):
         # ไม่ต้องขึ้น popup เพราะเป็นตอนปิดโปรแกรม
-        print("Save config error:", e)
+        print("Save config error: could not write configuration")
+        return False
 
 
 def load_config():
@@ -3347,6 +3475,8 @@ def shutdown_application() -> bool:
         history_window.close()
     for settings_window in tuple(application_settings_windows):
         settings_window.close()
+    for backup_window in tuple(backup_windows):
+        backup_window.close()
     for health_window in tuple(health_windows):
         health_window.close()
     save_config()
@@ -3596,6 +3726,8 @@ def apply_theme(theme: str):
         history_window.apply_theme(theme)
     for settings_window in tuple(application_settings_windows):
         settings_window.apply_theme(theme)
+    for backup_window in tuple(backup_windows):
+        backup_window.apply_theme(theme)
     for health_window in tuple(health_windows):
         health_window.apply_theme(theme)
 

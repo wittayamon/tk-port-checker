@@ -29,7 +29,9 @@ Main capabilities currently include:
 - PyInstaller EXE build support
 - Custom application icon
 
-Current released version: **v1.9.0**
+Current released version: **v1.11.0**
+
+Current recommended version for Portable Settings Backup work: **v1.12.0**
 
 Current recommended version for Notification Delivery History work: **v1.8.0**
 
@@ -89,7 +91,7 @@ Canonical verification commands from repository root are:
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q app_version.py application_health.py windows_startup.py multi_port_checker.py network_checks.py monitoring_state.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
+python -m compileall -q settings_backup.py settings_backup_ui.py app_version.py application_health.py windows_startup.py multi_port_checker.py network_checks.py monitoring_state.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 pyinstaller --clean --noconfirm MultiPortChecker.spec
 ```
 
@@ -360,6 +362,19 @@ Auto Refresh must:
 ---
 
 ## Host List and Config Compatibility
+
+### Portable Settings Backup invariants
+
+- Portable backups use an explicit safe allowlist; never dump or redact the entire config. Secrets and notification endpoints are omitted by default.
+- Windows startup registry state is machine-local and must never be exported or changed by restore; the hidden-start preference is portable.
+- Runtime SQLite history, delivery records, retry queues, and maintenance audit evidence are not settings backups.
+- Active maintenance is not portable. New/Replace targets start inactive; Merge preserves matching destination maintenance.
+- Host + Port is import identity. Import must not fabricate monitoring transitions, notifications, or historical events, and must leave existing retry rows untouched.
+- Backup format version is independent from application version. Reject unsupported formats; ignore unknown fields without persisting them.
+- Config writes remain atomic. Imports use validate/plan/write/apply and must create a secret-free pre-import safety backup before config mutation.
+- Runtime backups belong beside writable config, never in `_MEIPASS`. Backup payloads never supply output paths or executable instructions.
+- Keep focused comments explaining portability, endpoint preservation, rollback, and security invariants, and keep README EN/TH synchronized.
+- `settings_backup.py` owns UI-independent validation, planning and persistence; `settings_backup_ui.py` owns the compact Tk dialogs.
 
 Saved host records should remain backward-compatible with:
 

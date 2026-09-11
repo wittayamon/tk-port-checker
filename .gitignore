@@ -18,6 +18,9 @@ mpc_config.json
 p.json
 list.json
 events.db
+backups/
+*.mpcbackup.json
+MultiPortChecker-Backup-*.json
 
 # VS Code
 .vscode/

@@ -50,6 +50,26 @@ The Ping and TCP results are independent: a host can respond to Ping while its c
 - Persistent Notification Delivery History and bounded durable webhook retries
 - PyInstaller-compatible icon and resource handling
 
+## Settings Backup / Restore (v1.12 development)
+
+Open **Application Settings → Backup / Restore Settings**. **Export Settings** creates UTF-8 `MultiPortChecker-Backup-YYYYMMDD-HHMMSS.json` (`.mpcbackup.json` also works). The `MultiPortCheckerBackup` format contains `backup_version: 1`, source `app_version`, `created_at`, `secrets_included: false`, `settings`, and `targets`. The development version is `1.12.0-dev`; the published release remains v1.11.0.
+
+- Includes Host + Port, Device Name, Groups, theme, tray preferences, hidden-start preference, State Change Alerts, provider enabled preferences, notification timeout/retry count, and Retry Later preference.
+- Omits secret keys entirely, including Generic Webhook URL, Teams endpoint, tokens, Authorization and credentials. Destination endpoints remain unchanged. External providers are enabled only if their local endpoint passes validation; otherwise they are disabled with a warning.
+- Excludes SQLite databases, Event History, Notification Delivery History, failed deliveries, durable retry queue, availability evidence and maintenance audit history. Import creates no monitoring transitions or notifications and does not rewrite these records.
+- Actual **Start with Windows** registry registration remains machine-local. Enable it explicitly on the destination; importing the hidden-start preference does not register startup.
+
+**Import Settings / Preview** shows source metadata, target/group counts, new/matching targets, changed names/groups, invalid/duplicate counts and warnings. Select **Monitored Targets / Device Names / Groups**, **Application Preferences**, and/or **Notification Behavior Settings**, then confirm:
+
+- **Merge** keeps local targets, adds new Host + Port identities, and replaces matching Device Names and Groups (including empty imported values). Matching rows retain TCP baselines and live maintenance. New targets begin unchecked with maintenance disabled.
+- **Replace** explicitly warns before replacing the entire configured target list. All resulting targets have maintenance disabled, empty reason and null timestamps. Retained identities keep TCP baselines. Removed targets' historical evidence remains intact. Neither mode fabricates maintenance audit events.
+
+A secret-free `backups/Before-Import-YYYYMMDD-HHMMSS-ffffff.mpcbackup.json` is required before applying. It lives beside `mpc_config.json`, next to the source or EXE, never in `_MEIPASS`. The folder must be writable; safety-backup failure stops import. Config uses a same-directory temporary file and atomic replacement before UI changes. A failed write retains old config/UI; an application failure triggers rollback, with explicit reporting if disk rollback fails. Safety backups are not automatically pruned and contain target inventory.
+
+Wait for active checks/scans to finish before import. Changes then apply live without restart. Import limits are **5 MiB**, **10,000 targets**, nonempty hosts up to **253 characters**, integer ports **1–65535**, names up to **200 characters**, and the existing **10 groups / 32 characters** rules. Invalid targets are skipped and counted; duplicate Host + Port rows keep the first occurrence. Malformed setting types reject the backup. Unknown fields are ignored with a warning and never persisted. Format version controls compatibility independently of app version: format 1 accepts different source app versions; unsupported formats are rejected.
+
+Legacy **Save List / Load List** JSON remains separate and unchanged. CSV exports are reports/lists, **not settings backups**. Full local data backup is outside v1.12.
+
 ## Device Names and target data
 
 Device Name is optional and provides a friendly label such as `Demo-PLC`, `NAS-01`, or `Printer-01`. Groups are organizational metadata only: they do not change Host + Port identity, Ping/TCP behavior, or create monitoring sessions. Enter comma-separated values such as `PLC, Critical`; whitespace and empty values are removed, duplicates are removed case-insensitively, each value is limited to 32 characters, and each target is limited to 10 groups. The main **Group** filter is built only from persistent targets; monitoring and **Check All** continue for all persistent targets even while rows are filtered. Report group membership reflects the current config, not a historical snapshot.
@@ -312,6 +332,8 @@ The executable is created at `dist\MultiPortChecker.exe`. The canonical tracked 
 ```text
 multi_port_checker.py       Tkinter UI and background task coordination
 app_version.py              Central application version
+settings_backup.py          Portable backup validation, planning, atomic persistence
+settings_backup_ui.py       Backup/restore and selective import preview dialogs
 application_health.py       Secret-safe UI-independent health snapshots/export
 windows_startup.py          Per-user frozen-EXE startup registration helpers
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
@@ -344,6 +366,8 @@ tests/
   test_windows_notifications.py Native notification formatting/provider tests
   test_windows_startup.py     Registry, command, config, and start-hidden tests
   test_application_health.py Health aggregation, DB, privacy, and export tests
+  test_settings_backup.py     Backup format, import, and file security tests
+  test_settings_backup_integration.py Isolated real-Tk restore and rollback tests
 MultiPortChecker.spec       PyInstaller build configuration
 README.md
 README_TH.md
@@ -356,7 +380,7 @@ Future documentation screenshots must use sanitized fictional data and belong un
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q app_version.py application_health.py windows_startup.py multi_port_checker.py network_checks.py monitoring_state.py maintenance.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
+python -m compileall -q settings_backup.py settings_backup_ui.py app_version.py application_health.py windows_startup.py multi_port_checker.py network_checks.py monitoring_state.py maintenance.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 ```
 
 ## Roadmap

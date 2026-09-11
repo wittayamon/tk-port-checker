@@ -15,6 +15,26 @@
 
 [![Download EXE](https://img.shields.io/badge/Download-MultiPortChecker.exe-brightgreen?style=for-the-badge)](https://github.com/wittayamon/tk-port-checker/releases/latest/download/MultiPortChecker.exe)
 
+## สำรอง / คืนค่าการตั้งค่า (พัฒนา v1.12)
+
+เปิด **Application Settings → Backup / Restore Settings** แล้วเลือก **Export Settings** เพื่อสร้าง UTF-8 `MultiPortChecker-Backup-YYYYMMDD-HHMMSS.json` (รองรับ `.mpcbackup.json` ด้วย) รูปแบบ `MultiPortCheckerBackup` มี `backup_version: 1`, `app_version` ต้นทาง, `created_at`, `secrets_included: false`, `settings` และ `targets` รุ่นพัฒนาคือ `1.12.0-dev` ส่วนรุ่นเผยแพร่ยังเป็น v1.11.0
+
+- รวม Host + Port, Device Name, Groups, ธีม, ตัวเลือก System Tray, ตัวเลือกเริ่มแบบซ่อน, State Change Alerts, ตัวเลือกเปิดผู้ให้บริการแจ้งเตือน, timeout, จำนวน retry และตัวเลือก Retry Later
+- ไม่ส่งออกคีย์ข้อมูลลับ รวมถึง Generic Webhook URL, Teams endpoint, token, Authorization และ credentials โดย endpoint ในเครื่องปลายทางคงเดิม เปิดผู้ให้บริการภายนอกได้ต่อเมื่อ endpoint ในเครื่องผ่านการตรวจสอบ มิฉะนั้นจะปิดพร้อมคำเตือน
+- ไม่รวม SQLite, Event History, Notification Delivery History, รายการส่งล้มเหลว, durable retry queue, หลักฐาน Availability และ maintenance audit history การนำเข้าไม่สร้างการเปลี่ยนสถานะหรือการแจ้งเตือนและไม่เขียนทับประวัติเหล่านี้
+- การลงทะเบียน **Start with Windows** ใน registry เป็นข้อมูลเฉพาะเครื่อง ต้องเปิดเองบนเครื่องปลายทาง การนำเข้าตัวเลือกเริ่มแบบซ่อนไม่ลงทะเบียน startup
+
+**Import Settings / Preview** แสดงข้อมูลต้นทาง จำนวนเป้าหมาย/กลุ่ม เป้าหมายใหม่/ตรงกัน ชื่อ/กลุ่มที่เปลี่ยน จำนวนรายการไม่ถูกต้อง/ซ้ำ และคำเตือน เลือกหมวด **Monitored Targets / Device Names / Groups**, **Application Preferences** และ/หรือ **Notification Behavior Settings** แล้วจึงยืนยัน:
+
+- **Merge** เก็บเป้าหมายเดิม เพิ่ม Host + Port ใหม่ และแทน Device Name กับ Groups ของรายการที่ตรงกัน (รวมค่าว่างจากไฟล์) รายการเดิมคง TCP baseline และ maintenance ที่ใช้อยู่ เป้าหมายใหม่เริ่มแบบยังไม่ตรวจสอบและปิด maintenance
+- **Replace** มีคำเตือนชัดเจนก่อนแทนรายการเป้าหมายทั้งหมด เป้าหมายหลังคืนค่าจะปิด maintenance ล้างเหตุผลและเวลา รายการที่ยังมี Host + Port เดิมคง TCP baseline และรายการที่ลบยังมีหลักฐานประวัติเดิม ทั้งสองโหมดไม่สร้าง maintenance audit event สมมติ
+
+ก่อนนำไปใช้ต้องสร้างไฟล์ปลอดข้อมูลลับ `backups/Before-Import-YYYYMMDD-HHMMSS-ffffff.mpcbackup.json` ข้าง `mpc_config.json` ซึ่งอยู่ข้าง source หรือ EXE ไม่ใช่ `_MEIPASS` โฟลเดอร์ต้องเขียนได้ หากสำรองก่อนนำเข้าไม่สำเร็จจะหยุด การบันทึก config ใช้ไฟล์ชั่วคราวในโฟลเดอร์เดียวกันและแทนที่แบบ atomic ก่อนปรับ UI หากเขียนไม่สำเร็จจะคง config/UI เดิม หากปรับแอปล้มเหลวจะย้อนคืน และแจ้งชัดเจนหากเขียนย้อนคืนลงดิสก์ไม่ได้ ไม่มีการลบ safety backup อัตโนมัติ และไฟล์มีรายการเป้าหมายอยู่ด้วย
+
+รอการตรวจสอบ/สแกนให้เสร็จก่อนนำเข้า จากนั้นค่าจะเปลี่ยนทันทีโดยไม่ต้องเริ่มแอปใหม่ จำกัดไฟล์ **5 MiB**, **10,000 เป้าหมาย**, Host ไม่ว่างยาวไม่เกิน **253 ตัวอักษร**, Port จำนวนเต็ม **1–65535**, ชื่อไม่เกิน **200 ตัวอักษร** และกฎ Groups เดิม **10 กลุ่ม / 32 ตัวอักษร** รายการไม่ถูกต้องจะข้ามและนับจำนวน Host + Port ซ้ำใช้รายการแรก ชนิดข้อมูลการตั้งค่าที่ผิดจะปฏิเสธไฟล์ ฟิลด์ที่ไม่รู้จักจะละเว้นพร้อมคำเตือนและไม่บันทึก ความเข้ากันได้อิงเวอร์ชันรูปแบบแยกจากรุ่นแอป: รูปแบบ 1 ยอมรับแอปต้นทางต่างรุ่น และปฏิเสธรูปแบบที่ยังไม่รองรับ
+
+JSON เดิมของ **Save List / Load List** ยังแยกต่างหากและทำงานเหมือนเดิม CSV เป็นรายงาน/รายการ **ไม่ใช่ไฟล์สำรองการตั้งค่า** การสำรองข้อมูลในเครื่องทั้งหมดอยู่นอกขอบเขต v1.12
+
 ## ความสามารถ
 
 - Start with Windows แบบต่อผู้ใช้ และเลือกเริ่มแบบซ่อนใน System Tray ได้
@@ -314,6 +334,8 @@ pyinstaller --clean --noconfirm MultiPortChecker.spec
 ```text
 multi_port_checker.py       Tkinter UI and background task coordination
 app_version.py              เวอร์ชันแอปส่วนกลาง
+settings_backup.py          ตรวจสอบ วางแผนคืนค่า และบันทึก backup แบบ atomic
+settings_backup_ui.py       หน้าต่าง backup/restore และ preview แบบเลือกหมวด
 application_health.py       health snapshot/export ที่ไม่ขึ้นกับ UI และปกป้องข้อมูลลับ
 windows_startup.py          ตัวช่วยลงทะเบียน startup ต่อผู้ใช้สำหรับ frozen EXE
 network_checks.py           Ping, TCP, IPv4 validation, and scan-plan helpers
@@ -346,6 +368,8 @@ tests/
   test_windows_notifications.py Native notification formatting/provider tests
   test_windows_startup.py     การทดสอบ registry, command, config และ start-hidden
   test_application_health.py การทดสอบ health, DB, privacy และ export
+  test_settings_backup.py     ทดสอบรูปแบบ backup การนำเข้า และความปลอดภัยไฟล์
+  test_settings_backup_integration.py ทดสอบคืนค่าและ rollback ด้วย Tk แยกข้อมูล
 MultiPortChecker.spec       PyInstaller build configuration
 README.md
 README_TH.md
@@ -358,7 +382,7 @@ Screenshot สำหรับเอกสารในอนาคตต้อง
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m compileall -q app_version.py application_health.py windows_startup.py multi_port_checker.py network_checks.py monitoring_state.py maintenance.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
+python -m compileall -q settings_backup.py settings_backup_ui.py app_version.py application_health.py windows_startup.py multi_port_checker.py network_checks.py monitoring_state.py maintenance.py event_history.py availability_report.py notification_history.py windows_tray.py notification_models.py notification_manager.py windows_notifications.py webhook_notifications.py tests
 ```
 
 ## แผนงานในอนาคต
