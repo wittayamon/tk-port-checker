@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased — recommended v1.12.0
+## v1.12.0 - 2026-09-11
 
 ### Added
 
@@ -15,7 +15,7 @@ All notable changes to this project are documented here.
 - Atomic configuration writes and validate/plan/write/apply restore with rollback on application failure.
 - Bounded UTF-8 import validation (5 MiB, 10,000 targets), existing group normalization, unknown-field warnings, and unsupported-format rejection.
 - Secret-safe portability: endpoints remain local, providers require valid destination endpoints, and startup registry state, SQLite history, retries, and active maintenance are excluded.
-- Comments and tests around portability, maintenance, target identity, Tk application, and persistence failure paths. Development version is `1.12.0-dev`; no release date or tag is finalized.
+- Comments and tests around portability, maintenance, target identity, Tk application, and persistence failure paths.
 
 ## v1.11.0 - 2026-09-10
 

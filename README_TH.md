@@ -15,9 +15,9 @@
 
 [![Download EXE](https://img.shields.io/badge/Download-MultiPortChecker.exe-brightgreen?style=for-the-badge)](https://github.com/wittayamon/tk-port-checker/releases/latest/download/MultiPortChecker.exe)
 
-## สำรอง / คืนค่าการตั้งค่า (พัฒนา v1.12)
+## สำรอง / คืนค่าการตั้งค่า (v1.12.0)
 
-เปิด **Application Settings → Backup / Restore Settings** แล้วเลือก **Export Settings** เพื่อสร้าง UTF-8 `MultiPortChecker-Backup-YYYYMMDD-HHMMSS.json` (รองรับ `.mpcbackup.json` ด้วย) รูปแบบ `MultiPortCheckerBackup` มี `backup_version: 1`, `app_version` ต้นทาง, `created_at`, `secrets_included: false`, `settings` และ `targets` รุ่นพัฒนาคือ `1.12.0-dev` ส่วนรุ่นเผยแพร่ยังเป็น v1.11.0
+เปิด **Application Settings → Backup / Restore Settings** แล้วเลือก **Export Settings** เพื่อสร้าง UTF-8 `MultiPortChecker-Backup-YYYYMMDD-HHMMSS.json` (รองรับ `.mpcbackup.json` ด้วย) รูปแบบ `MultiPortCheckerBackup` มี `backup_version: 1`, `app_version` ต้นทาง, `created_at`, `secrets_included: false`, `settings` และ `targets` ใช้งานได้ใน v1.12.0
 
 - รวม Host + Port, Device Name, Groups, ธีม, ตัวเลือก System Tray, ตัวเลือกเริ่มแบบซ่อน, State Change Alerts, ตัวเลือกเปิดผู้ให้บริการแจ้งเตือน, timeout, จำนวน retry และตัวเลือก Retry Later
 - ไม่ส่งออกคีย์ข้อมูลลับ รวมถึง Generic Webhook URL, Teams endpoint, token, Authorization และ credentials โดย endpoint ในเครื่องปลายทางคงเดิม เปิดผู้ให้บริการภายนอกได้ต่อเมื่อ endpoint ในเครื่องผ่านการตรวจสอบ มิฉะนั้นจะปิดพร้อมคำเตือน

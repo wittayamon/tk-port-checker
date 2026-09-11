@@ -50,9 +50,9 @@ The Ping and TCP results are independent: a host can respond to Ping while its c
 - Persistent Notification Delivery History and bounded durable webhook retries
 - PyInstaller-compatible icon and resource handling
 
-## Settings Backup / Restore (v1.12 development)
+## Settings Backup / Restore (v1.12.0)
 
-Open **Application Settings → Backup / Restore Settings**. **Export Settings** creates UTF-8 `MultiPortChecker-Backup-YYYYMMDD-HHMMSS.json` (`.mpcbackup.json` also works). The `MultiPortCheckerBackup` format contains `backup_version: 1`, source `app_version`, `created_at`, `secrets_included: false`, `settings`, and `targets`. The development version is `1.12.0-dev`; the published release remains v1.11.0.
+Open **Application Settings → Backup / Restore Settings**. **Export Settings** creates UTF-8 `MultiPortChecker-Backup-YYYYMMDD-HHMMSS.json` (`.mpcbackup.json` also works). The `MultiPortCheckerBackup` format contains `backup_version: 1`, source `app_version`, `created_at`, `secrets_included: false`, `settings`, and `targets`. Available in v1.12.0.
 
 - Includes Host + Port, Device Name, Groups, theme, tray preferences, hidden-start preference, State Change Alerts, provider enabled preferences, notification timeout/retry count, and Retry Later preference.
 - Omits secret keys entirely, including Generic Webhook URL, Teams endpoint, tokens, Authorization and credentials. Destination endpoints remain unchanged. External providers are enabled only if their local endpoint passes validation; otherwise they are disabled with a warning.
