@@ -104,6 +104,7 @@ class HealthSnapshot:
     generated_at: datetime
     process_started_at: datetime
     components: tuple[ComponentHealth, ...]
+    health_summary: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def overall_status(self) -> str:
@@ -114,6 +115,11 @@ class HealthSnapshot:
         return max(0.0, (self.generated_at - self.process_started_at).total_seconds())
 
     def to_dict(self) -> dict[str, Any]:
+        health = dict(self.health_summary)
+        if "open_count" in health:
+            health = health_incident_details(health,
+                watchdog_enabled=health.get("watchdog_enabled", True),
+                auto_recovery_enabled=health.get("auto_recovery_enabled", True))
         return {
             "application": "MultiPortChecker",
             "version": self.version,
@@ -121,6 +127,7 @@ class HealthSnapshot:
             "overall_status": self.overall_status,
             "uptime_seconds": round(self.uptime_seconds, 3),
             "components": [component.to_dict() for component in self.components],
+            "health": _safe_details(health),
         }
 
     def summary_text(self) -> str:
@@ -250,9 +257,9 @@ def simple_component(name, *, available: Optional[bool], summary: str, details=N
     return ComponentHealth(name, status, summary, details or {}, now)
 
 
-def build_snapshot(*, version: str, process_started_at: datetime, components, now=None):
+def build_snapshot(*, version: str, process_started_at: datetime, components, now=None, health_summary=None):
     current = now or datetime.now().astimezone()
-    return HealthSnapshot(version, current, process_started_at, tuple(components))
+    return HealthSnapshot(version, current, process_started_at, tuple(components), health_summary or {})
 
 
 def export_diagnostics_json(path: str, snapshot: HealthSnapshot) -> None:
@@ -260,3 +267,16 @@ def export_diagnostics_json(path: str, snapshot: HealthSnapshot) -> None:
     with open(path, "w", encoding="utf-8") as output:
         json.dump(snapshot.to_dict(), output, indent=2, ensure_ascii=False)
         output.write("\n")
+
+
+def health_incident_details(summary: Mapping[str, Any], *, watchdog_enabled=True,
+                            auto_recovery_enabled=True) -> dict[str, Any]:
+    """Expose only aggregate incident counters; incident text stays in local history."""
+    return {
+        "open_health_incidents": int(summary.get("open_count", 0)),
+        "open_warning_count": int(summary.get("open_warning_count", 0)),
+        "open_error_count": int(summary.get("open_error_count", 0)),
+        "last_health_incident_at": summary.get("last_incident_at"),
+        "watchdog_enabled": bool(watchdog_enabled),
+        "auto_recovery_enabled": bool(auto_recovery_enabled),
+    }

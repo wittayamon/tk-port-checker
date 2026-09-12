@@ -29,6 +29,8 @@ MAX_BACKUP_BYTES = 5 * 1024 * 1024
 MAX_BACKUP_TARGETS = 10000
 PREFERENCES = frozenset(("theme", "state_change_alerts", "minimize_to_tray",
                          "close_to_tray", "start_hidden_on_windows_startup"))
+HEALTH_PREFERENCES = frozenset(("health_watchdog_enabled", "health_notifications_enabled",
+                                "health_auto_recovery_enabled"))
 NOTIFICATIONS = frozenset(("windows_notifications_enabled", "generic_webhook_enabled",
     "teams_webhook_enabled", "notification_timeout_seconds", "notification_retry_count",
     "notification_retry_later_enabled"))
@@ -72,14 +74,18 @@ def _target(value):
     return normalize_target_record(dict(host=host, port=port, name=name, groups=groups))
 
 
-def _settings(value):
+def _settings(value, *, include_defaults=False):
     if not isinstance(value, dict):
         raise BackupError("Settings must be an object.")
     result = {}
-    for key in PREFERENCES | NOTIFICATIONS:
-        if key not in value:
+    # New health preferences are explicit in v1.13 backups while old config
+    # files safely receive backward-compatible defaults.
+    defaults = {"health_watchdog_enabled": True, "health_notifications_enabled": False,
+                "health_auto_recovery_enabled": True}
+    for key in PREFERENCES | HEALTH_PREFERENCES | NOTIFICATIONS:
+        if key not in value and not (include_defaults and key in defaults):
             continue
-        item = value[key]
+        item = value.get(key, defaults.get(key))
         if key == "theme":
             valid = isinstance(item, str) and item in ("dark", "light")
         elif key in ("notification_timeout_seconds", "notification_retry_count"):
@@ -115,7 +121,7 @@ def validate_backup(payload):
     warnings, clean, seen = [], [], set()
     invalid = duplicates = 0
     unknown = bool(set(payload) - {"format", "backup_version", "app_version", "created_at", "settings", "targets", "secrets_included"})
-    unknown |= bool(set(payload.get("settings", {})) - PREFERENCES - NOTIFICATIONS)
+    unknown |= bool(set(payload.get("settings", {})) - PREFERENCES - HEALTH_PREFERENCES - NOTIFICATIONS)
     for entry in targets:
         try:
             target = _target(entry)
@@ -151,7 +157,7 @@ def build_backup(config, *, now=None):
         records.append(item)
     payload = dict(format="MultiPortCheckerBackup", backup_version=BACKUP_FORMAT_VERSION,
         app_version=APP_VERSION, created_at=(now or datetime.now(timezone.utc)).isoformat(),
-        secrets_included=False, settings=_settings(config), targets=records)
+        secrets_included=False, settings=_settings(config, include_defaults=True), targets=records)
     parsed = validate_backup(payload)
     if parsed.invalid or parsed.duplicates:
         raise BackupError("Current targets must be valid and unique before backup.")

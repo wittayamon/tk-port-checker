@@ -29,7 +29,10 @@ from application_health import (
     notification_component,
     simple_component,
     store_component,
+    health_incident_details,
 )
+from application_watchdog import ApplicationWatchdog, RecoveryResult, WATCHDOG_INTERVAL_SECONDS
+from health_incidents import HealthIncidentStore
 
 from availability_report import (
     ConfiguredTarget,
@@ -147,6 +150,9 @@ last_availability_report_at = None
 last_availability_report_success = None
 config_health_status = HEALTH_HEALTHY
 config_health_summary = "Configuration defaults in use"
+health_incident_store = None
+health_watchdog = None
+health_watchdog_after_id = None
 
 network_executor = ThreadPoolExecutor(max_workers=CHECK_WORKERS, thread_name_prefix="network-check")
 trace_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="trace-route")
@@ -158,6 +164,7 @@ notification_settings_windows = set()
 notification_history_windows = set()
 application_settings_windows = set()
 health_windows = set()
+health_incident_windows = set()
 backup_windows = set()
 tcp_state_tracker = TcpStateTracker()
 event_history_store = None
@@ -218,6 +225,13 @@ def get_notification_history_store():
     if notification_history_store is None:
         notification_history_store = NotificationHistoryStore(get_event_db_path())
     return notification_history_store
+
+
+def get_health_incident_store():
+    global health_incident_store
+    if health_incident_store is None:
+        health_incident_store = HealthIncidentStore(get_event_db_path())
+    return health_incident_store
 
 
 def resource_path(relative_path: str) -> str:
@@ -2563,6 +2577,9 @@ def _health_capture_from_ui() -> dict:
         "network_pending": sum(1 for *_values, future in active_checks if not future.done()),
         "notification_providers_enabled": bool(notification_settings.enabled_providers()),
         "start_hidden_preference": bool(start_hidden_on_windows_startup_var.get()),
+        "health_watchdog_enabled": bool(health_watchdog_enabled_var.get()),
+        "health_notifications_enabled": bool(health_notifications_enabled_var.get()),
+        "health_auto_recovery_enabled": bool(health_auto_recovery_enabled_var.get()),
     }
 
 
@@ -2596,6 +2613,15 @@ def _build_runtime_health(captured: dict):
         maintenance_component(captured["maintenance_states"],
                               scheduler_active=maintenance_after_id is not None, now=now),
     ]
+    incident_summary = get_health_incident_store().summary()
+    components.append(ComponentHealth(
+        "Health Watchdog", HEALTH_HEALTHY if captured["health_watchdog_enabled"] else HEALTH_UNKNOWN,
+        "Running" if captured["health_watchdog_enabled"] else "Disabled",
+        {**health_incident_details(incident_summary, watchdog_enabled=captured["health_watchdog_enabled"], auto_recovery_enabled=captured["health_auto_recovery_enabled"]),
+         "watchdog_running": bool(health_watchdog and health_watchdog.running),
+         "last_watchdog_tick": getattr(health_watchdog, "last_tick", None),
+         "last_watchdog_duration_ms": getattr(health_watchdog, "last_duration_ms", None)}, now,
+    ))
     availability_status = HEALTH_WARNING if last_availability_report_success is False else HEALTH_HEALTHY
     availability_summary = "Last report generation failed" if last_availability_report_success is False else ("Ready" if last_availability_report_at is None else "Last report completed")
     components.append(ComponentHealth(
@@ -2628,10 +2654,60 @@ def _build_runtime_health(captured: dict):
             "Enabled" if startup.enabled else "Disabled", startup_details, now)
     components.extend((startup_health, ComponentHealth(
         "Configuration", config_health_status, config_health_summary,
-        {"group_count": captured["group_count"], "validation_status": config_health_status}, now,
+        {"group_count": captured["group_count"], "validation_status": config_health_status,
+         **health_incident_details(incident_summary, watchdog_enabled=captured["health_watchdog_enabled"], auto_recovery_enabled=captured["health_auto_recovery_enabled"])}, now,
     )))
     return build_snapshot(version=APP_VERSION, process_started_at=process_started_at,
-                          components=components, now=now)
+                          components=components, now=now,
+                          health_summary=health_incident_details(
+                              incident_summary,
+                              watchdog_enabled=captured["health_watchdog_enabled"],
+                              auto_recovery_enabled=captured["health_auto_recovery_enabled"]))
+
+
+class HealthIncidentHistoryWindow:
+    """Read-only incident timeline; only resolved rows may be cleared."""
+    def __init__(self, parent):
+        self.window = tk.Toplevel(parent); self.window.title("Health Incident History"); self.window.geometry("900x420")
+        self._closed = False
+        filters = tk.Frame(self.window); filters.pack(fill="x", padx=10, pady=(10, 0))
+        self.component_var = tk.StringVar(value="All"); self.severity_var = tk.StringVar(value="All"); self.status_var = tk.StringVar(value="All"); self.search_var = tk.StringVar()
+        self.component_combo = ttk.Combobox(filters, textvariable=self.component_var, values=("All",), width=18, state="readonly")
+        self.severity_combo = ttk.Combobox(filters, textvariable=self.severity_var, values=("All", "INFO", "WARNING", "ERROR"), width=10, state="readonly")
+        self.status_combo = ttk.Combobox(filters, textvariable=self.status_var, values=("All", "OPEN", "RESOLVED"), width=10, state="readonly")
+        self.search_entry = tk.Entry(filters, textvariable=self.search_var, width=24)
+        for label, widget in (("Component", self.component_combo),("Severity", self.severity_combo),("Status", self.status_combo),("Search", self.search_entry)):
+            tk.Label(filters, text=label).pack(side="left", padx=(0, 3)); widget.pack(side="left", padx=(0, 8))
+        self.component_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh()); self.severity_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh()); self.status_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh()); self.search_entry.bind("<KeyRelease>", lambda _event: self.refresh())
+        self.tree = ttk.Treeview(self.window, columns=("time", "component", "severity", "incident", "status", "occurrences", "resolved", "recovery"), show="headings")
+        for column, label, width in (("time","Date/Time",145),("component","Component",150),("severity","Severity",75),("incident","Incident",250),("status","Status",75),("occurrences","Occurrences",80),("resolved","Resolved",145),("recovery","Recovery",160)):
+            self.tree.heading(column, text=label); self.tree.column(column, width=width, anchor="w")
+        self.tree.pack(fill="both", expand=True, padx=10, pady=10)
+        buttons=tk.Frame(self.window); buttons.pack(pady=(0,10))
+        self.refresh_button=tk.Button(buttons,text="Refresh",command=self.refresh); self.clear_button=tk.Button(buttons,text="Clear Resolved",command=self.clear_resolved); self.close_button=tk.Button(buttons,text="Close",command=self.close)
+        for i,b in enumerate((self.refresh_button,self.clear_button,self.close_button)): b.grid(row=0,column=i,padx=4)
+        health_incident_windows.add(self); self.window.protocol("WM_DELETE_WINDOW", self.close); self.apply_theme(current_theme); self.refresh()
+    def refresh(self):
+        for item in self.tree.get_children(): self.tree.delete(item)
+        rows = get_health_incident_store().list(component=self.component_var.get(), severity=self.severity_var.get(), status=self.status_var.get(), search=self.search_var.get())
+        self.component_combo.configure(values=("All", *sorted({row.component for row in get_health_incident_store().list(limit=5000)})))
+        for incident in rows:
+            self.tree.insert("", "end", values=(incident.created_at,incident.component,incident.severity,incident.summary,incident.status,incident.occurrence_count,incident.resolved_at or "-",incident.recovery_result or "-"))
+    def clear_resolved(self):
+        if messagebox.askyesno("Health Incident History", "Clear all resolved health incidents?", parent=self.window): self.refresh() if not get_health_incident_store().clear_resolved() else self.refresh()
+    def apply_theme(self, theme):
+        palette=get_theme_palette(theme); self.window.configure(bg=palette["bg"])
+        for b in (self.refresh_button,self.clear_button,self.close_button): b.configure(bg=palette["button_bg"],fg=palette["fg"])
+    def close(self):
+        if self._closed:return
+        self._closed=True; health_incident_windows.discard(self); self.window.destroy()
+
+
+def open_health_incident_history():
+    for window in tuple(health_incident_windows):
+        if not window._closed:
+            window.window.deiconify(); window.window.lift(); window.refresh(); return window
+    return HealthIncidentHistoryWindow(root)
 
 
 class HealthDiagnosticsWindow:
@@ -2672,6 +2748,7 @@ class HealthDiagnosticsWindow:
         self.buttons = [tk.Button(buttons, text="Refresh", width=14, command=self.refresh),
                         tk.Button(buttons, text="Copy Summary", width=14, command=self.copy_summary),
                         tk.Button(buttons, text="Export Diagnostics", width=18, command=self.export),
+                        tk.Button(buttons, text="Incident History", width=16, command=open_health_incident_history),
                         tk.Button(buttons, text="Close", width=12, command=self.close)]
         for index, button in enumerate(self.buttons):
             button.grid(row=0, column=index, padx=4)
@@ -2798,6 +2875,15 @@ class ApplicationSettingsWindow:
         self.close_check = tk.Checkbutton(behavior, text="Close button minimizes to tray", variable=close_to_tray_var)
         self.checks.extend((self.minimize_check, self.close_check))
         self.minimize_check.pack(anchor="w"); self.close_check.pack(anchor="w")
+        health_frame = tk.LabelFrame(self.window, text="Health Monitoring", padx=10, pady=6)
+        health_frame.pack(fill="x", padx=12, pady=6); self.frames.append(health_frame)
+        self.health_checks = [
+            tk.Checkbutton(health_frame, text="Internal watchdog", variable=health_watchdog_enabled_var),
+            tk.Checkbutton(health_frame, text="Windows health notifications", variable=health_notifications_enabled_var),
+            tk.Checkbutton(health_frame, text="Safe automatic recovery", variable=health_auto_recovery_enabled_var),
+        ]
+        self.checks.extend(self.health_checks)
+        for check in self.health_checks: check.pack(anchor="w")
         buttons = tk.Frame(self.window); buttons.pack(pady=10); self.frames.append(buttons)
         self.buttons = [tk.Button(buttons, text="Health / Diagnostics", width=18, command=open_health_diagnostics),
                         tk.Button(buttons, text="Save", width=10, command=self.save),
@@ -2871,7 +2957,10 @@ SQLite evidence and retry rows are deliberately outside this operation.
     for key, variable in (("state_change_alerts", state_change_alerts_var),
                           ("minimize_to_tray", minimize_to_tray_var),
                           ("close_to_tray", close_to_tray_var),
-                          ("start_hidden_on_windows_startup", start_hidden_on_windows_startup_var)):
+                          ("start_hidden_on_windows_startup", start_hidden_on_windows_startup_var),
+                          ("health_watchdog_enabled", health_watchdog_enabled_var),
+                          ("health_notifications_enabled", health_notifications_enabled_var),
+                          ("health_auto_recovery_enabled", health_auto_recovery_enabled_var)):
         variable.set(config[key])
     # This preference update must never call enable_startup/disable_startup.
     for settings_window in tuple(application_settings_windows):
@@ -3189,6 +3278,9 @@ def snapshot_config():
         "minimize_to_tray": bool(minimize_to_tray_var.get()),
         "close_to_tray": bool(close_to_tray_var.get()),
         "start_hidden_on_windows_startup": bool(start_hidden_on_windows_startup_var.get()),
+        "health_watchdog_enabled": bool(health_watchdog_enabled_var.get()),
+        "health_notifications_enabled": bool(health_notifications_enabled_var.get()),
+        "health_auto_recovery_enabled": bool(health_auto_recovery_enabled_var.get()),
         "hosts": hosts,
     }
     config.update(notification_settings.to_config())
@@ -3246,8 +3338,16 @@ def load_config():
     minimize_to_tray_var.set(tray_preferences.minimize_to_tray)
     close_to_tray_var.set(tray_preferences.close_to_tray)
     start_hidden_on_windows_startup_var.set(startup_hidden_from_config(config))
+    for key, variable, default in (
+        ("health_watchdog_enabled", health_watchdog_enabled_var, True),
+        ("health_notifications_enabled", health_notifications_enabled_var, False),
+        ("health_auto_recovery_enabled", health_auto_recovery_enabled_var, True),
+    ):
+        value = config.get(key, default)
+        variable.set(value if isinstance(value, bool) else default)
     for key in ("state_change_alerts", "minimize_to_tray", "close_to_tray",
-                "start_hidden_on_windows_startup"):
+                "start_hidden_on_windows_startup", "health_watchdog_enabled",
+                "health_notifications_enabled", "health_auto_recovery_enabled"):
         if key in config and not isinstance(config[key], bool):
             normalized += 1
     notification_settings = notification_settings_from_config(config)
@@ -3289,6 +3389,121 @@ def resolve_expired_maintenance_on_startup():
             changed = True
     if changed:
         save_config()
+
+
+def _health_watchdog_notification(severity: str, summary: str) -> None:
+    if not health_notifications_enabled_var.get() or tray_icon is None:
+        return
+    if severity == "RECOVERED":
+        title = "MultiPortChecker Recovered"
+        warning = False
+    else:
+        title = f"MultiPortChecker Health {severity.title()}"
+        warning = severity == HEALTH_ERROR
+    tray_icon.show_notification(title, summary[:200], warning)
+
+
+def _health_watchdog_probe() -> list[dict]:
+    """Read cached lifecycle state only; target OFFLINE is intentionally absent."""
+    if shutdown_guard.started:
+        return []
+    now = datetime.now().astimezone()
+    checks = []
+    if auto_running:
+        try:
+            interval = max(1, int(entry_interval.get().strip()))
+        except (TypeError, ValueError):
+            interval = 5
+        stale_after = max(3 * interval, 60)
+        age = None if last_successful_monitor_cycle_at is None else (now - last_successful_monitor_cycle_at).total_seconds()
+        if age is None or age > stale_after:
+            checks.append({"component": "Monitoring", "event_type": "MONITORING_CYCLE_STALE", "severity": HEALTH_WARNING,
+                           "summary": "Auto Refresh has no recent successful cycle", "details": f"stale_after_seconds={stale_after}", "fingerprint": "Monitoring:MONITORING_CYCLE_STALE"})
+        else:
+            checks.append({"component": "Monitoring", "event_type": "MONITORING_CYCLE_STALE", "severity": HEALTH_HEALTHY, "fingerprint": "Monitoring:MONITORING_CYCLE_STALE"})
+    if notification_manager is not None:
+        details = notification_manager.health_summary()
+        if not details.get("shutdown_started") and not details.get("worker_alive"):
+            checks.append({"component": "Notification System", "event_type": "NOTIFICATION_WORKER_STOPPED", "severity": HEALTH_ERROR,
+                           "summary": "Notification worker stopped unexpectedly", "recoverable": True, "action": "notification_worker", "fingerprint": "Notification System:NOTIFICATION_WORKER_STOPPED"})
+        else:
+            checks.append({"component": "Notification System", "event_type": "NOTIFICATION_WORKER_STOPPED", "severity": HEALTH_HEALTHY, "fingerprint": "Notification System:NOTIFICATION_WORKER_STOPPED"})
+        if not details.get("shutdown_started") and not details.get("scheduler_alive"):
+            checks.append({"component": "Notification System", "event_type": "RETRY_SCHEDULER_STOPPED", "severity": HEALTH_ERROR,
+                           "summary": "Notification retry scheduler stopped unexpectedly", "recoverable": True, "action": "notification_worker", "fingerprint": "Notification System:RETRY_SCHEDULER_STOPPED"})
+        else:
+            checks.append({"component": "Notification System", "event_type": "RETRY_SCHEDULER_STOPPED", "severity": HEALTH_HEALTHY, "fingerprint": "Notification System:RETRY_SCHEDULER_STOPPED"})
+        capacity = 256
+        depth = int(details.get("queue_size", 0))
+        if depth >= int(capacity * .75):
+            checks.append({"component": "Notification System", "event_type": "NOTIFICATION_QUEUE_BACKLOG", "severity": HEALTH_WARNING,
+                           "summary": "Notification queue backlog is high", "details": f"queue_depth={depth}", "fingerprint": "Notification System:NOTIFICATION_QUEUE_BACKLOG"})
+        elif depth < int(capacity * .50):
+            checks.append({"component": "Notification System", "event_type": "NOTIFICATION_QUEUE_BACKLOG", "severity": HEALTH_HEALTHY, "fingerprint": "Notification System:NOTIFICATION_QUEUE_BACKLOG"})
+    if main_window_hidden and not tray_available:
+        # A hidden window with no tray icon is otherwise inaccessible; restore it
+        # on the Tk thread rather than attempting fragile native tray recovery.
+        restore_main_window()
+        checks.append({"component": "System Tray", "event_type": "TRAY_THREAD_STOPPED", "severity": HEALTH_ERROR,
+                       "summary": "System Tray unavailable while application was hidden", "fingerprint": "System Tray:TRAY_THREAD_STOPPED"})
+    elif tray_available:
+        checks.append({"component": "System Tray", "event_type": "TRAY_THREAD_STOPPED", "severity": HEALTH_HEALTHY, "fingerprint": "System Tray:TRAY_THREAD_STOPPED"})
+    for name, store, event_type in (("Event History", get_event_history_store(), "EVENT_DB_UNAVAILABLE"), ("Notification Delivery History", get_notification_history_store(), "NOTIFICATION_DB_UNAVAILABLE")):
+        summary = store.health_summary()
+        if not summary.get("accessible"):
+            checks.append({"component": name, "event_type": event_type, "severity": HEALTH_ERROR, "summary": "Database is inaccessible", "fingerprint": f"{name}:{event_type}"})
+        else:
+            checks.append({"component": name, "event_type": event_type, "severity": HEALTH_HEALTHY, "fingerprint": f"{name}:{event_type}"})
+        if name == "Notification Delivery History" and summary.get("accessible"):
+            failed = int(summary.get("counts", {}).get("FAILED", 0))
+            checks.append({"component": name, "event_type": "FAILED_DELIVERY_BACKLOG", "severity": HEALTH_WARNING if failed else HEALTH_HEALTHY,
+                           "summary": "Failed delivery backlog remains" if failed else "Failed delivery backlog cleared",
+                           "details": f"failed_count={failed}", "fingerprint": "Notification Delivery History:FAILED_DELIVERY_BACKLOG"})
+    overdue = any(maintenance_has_expired(maintenance_state_for(item), now) for item in all_persistent_items())
+    if overdue and maintenance_after_id is None:
+        checks.append({"component": "Maintenance", "event_type": "MAINTENANCE_SCHEDULER_STALLED", "severity": HEALTH_WARNING,
+                       "summary": "Expired maintenance awaits cleanup", "recoverable": True, "action": "maintenance_reconcile", "fingerprint": "Maintenance:MAINTENANCE_SCHEDULER_STALLED"})
+    elif not overdue:
+        checks.append({"component": "Maintenance", "event_type": "MAINTENANCE_SCHEDULER_STALLED", "severity": HEALTH_HEALTHY, "fingerprint": "Maintenance:MAINTENANCE_SCHEDULER_STALLED"})
+    return checks
+
+
+def _health_watchdog_recover(action: str) -> RecoveryResult:
+    now = datetime.now().astimezone()
+    if action == "notification_worker" and notification_manager is not None:
+        # Recreate only the bounded manager; durable rows remain in SQLite and
+        # startup recovery is performed by its canonical configure path.
+        try:
+            notification_manager.shutdown(timeout=.1)
+            start_notification_support()
+            return RecoveryResult(True, action, "Notification worker restarted", 1, now)
+        except Exception:
+            return RecoveryResult(False, action, "Notification worker recovery failed", 1, now)
+    if action == "maintenance_reconcile":
+        try:
+            resolve_expired_maintenance_on_startup()
+            return RecoveryResult(True, action, "Maintenance expiry reconciled", 1, now)
+        except Exception:
+            return RecoveryResult(False, action, "Maintenance reconciliation failed", 1, now)
+    return RecoveryResult(False, action, "No safe recovery available", 1, now)
+
+
+def poll_health_watchdog():
+    global health_watchdog_after_id
+    health_watchdog_after_id = None
+    if shutdown_guard.started or health_watchdog is None:
+        return
+    health_watchdog.enabled = bool(health_watchdog_enabled_var.get())
+    health_watchdog.recover = _health_watchdog_recover if health_auto_recovery_enabled_var.get() else None
+    health_watchdog.tick()
+    health_watchdog_after_id = root.after(WATCHDOG_INTERVAL_SECONDS * 1000, poll_health_watchdog)
+
+
+def start_health_watchdog():
+    global health_watchdog, health_watchdog_after_id
+    health_watchdog = ApplicationWatchdog(probe=_health_watchdog_probe, incident_store=get_health_incident_store(), notify=_health_watchdog_notification, recover=_health_watchdog_recover)
+    health_watchdog.enabled = bool(health_watchdog_enabled_var.get())
+    health_watchdog_after_id = root.after(WATCHDOG_INTERVAL_SECONDS * 1000, poll_health_watchdog)
 
 
 # ===================== Windows System Tray / shutdown =====================
@@ -3428,9 +3643,18 @@ def on_close() -> None:
 def shutdown_application() -> bool:
     """Idempotent canonical cleanup used by every real Exit action."""
     global auto_running, tray_poll_after_id, notification_poll_after_id
-    global tray_available, main_window_hidden, maintenance_after_id
+    global tray_available, main_window_hidden, maintenance_after_id, health_watchdog_after_id
     if not shutdown_guard.begin():
         return False
+
+    # Stop incident generation before intentionally stopping workers, otherwise
+    # normal shutdown would be recorded as a false worker-death incident.
+    if health_watchdog is not None:
+        health_watchdog.stop()
+    if health_watchdog_after_id is not None:
+        try: root.after_cancel(health_watchdog_after_id)
+        except tk.TclError: pass
+        health_watchdog_after_id = None
 
     auto_running = False
     main_window_hidden = False
@@ -3479,6 +3703,8 @@ def shutdown_application() -> bool:
         backup_window.close()
     for health_window in tuple(health_windows):
         health_window.close()
+    for incident_window in tuple(health_incident_windows):
+        incident_window.close()
     save_config()
     if tray_icon is not None:
         tray_icon.stop()
@@ -3921,6 +4147,9 @@ btn_theme = tk.Button(frame_bottom, text="Dark Mode", width=15, command=toggle_t
 btn_theme.grid(row=2, column=2, padx=5, pady=(10, 0))
 
 state_change_alerts_var = tk.BooleanVar(value=True)
+health_watchdog_enabled_var = tk.BooleanVar(value=True)
+health_notifications_enabled_var = tk.BooleanVar(value=False)
+health_auto_recovery_enabled_var = tk.BooleanVar(value=True)
 chk_state_alerts = tk.Checkbutton(
     frame_bottom,
     text="State Change Alerts",
@@ -3996,6 +4225,7 @@ root.bind("<Unmap>", handle_root_unmap, add="+")
 start_tray_support()
 start_notification_support()
 maintenance_after_id = root.after(1_000, poll_maintenance_expiry)
+start_health_watchdog()
 
 # The flag changes only initial presentation; hidden and normal launches share
 # this root, all background services, tray callbacks, and canonical shutdown.

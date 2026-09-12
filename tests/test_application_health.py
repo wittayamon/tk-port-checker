@@ -63,6 +63,15 @@ class ApplicationHealthTests(unittest.TestCase):
     def test_08_deterministic_injected_clock(self):
         self.assertEqual(build_snapshot(version="1", process_started_at=NOW, components=[], now=NOW).generated_at, NOW)
 
+    def test_health_incident_aggregate_export_fields(self):
+        snapshot = build_snapshot(version="1", process_started_at=NOW, components=[], now=NOW,
+                                  health_summary={"open_count": 2, "open_warning_count": 1,
+                                                  "open_error_count": 1, "last_incident_at": "2026-09-12T12:00:00+00:00",
+                                                  "watchdog_enabled": True, "auto_recovery_enabled": True})
+        exported = snapshot.to_dict()["health"]
+        self.assertEqual(exported["open_health_incidents"], 2)
+        self.assertNotIn("targets", exported)
+
     def test_09_source_application_component(self):
         item = application_component(version="1", frozen=False)
         self.assertEqual(item.details["running_mode"], "source")

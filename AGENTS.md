@@ -29,9 +29,9 @@ Main capabilities currently include:
 - PyInstaller EXE build support
 - Custom application icon
 
-Current released version: **v1.11.0**
+Current released version: **v1.12.0**
 
-Current recommended version for Portable Settings Backup work: **v1.12.0**
+Current recommended version for Health Watchdog / Incident History work: **v1.13.0**
 
 Current recommended version for Notification Delivery History work: **v1.8.0**
 
@@ -375,6 +375,18 @@ Auto Refresh must:
 - Runtime backups belong beside writable config, never in `_MEIPASS`. Backup payloads never supply output paths or executable instructions.
 - Keep focused comments explaining portability, endpoint preservation, rollback, and security invariants, and keep README EN/TH synchronized.
 - `settings_backup.py` owns UI-independent validation, planning and persistence; `settings_backup_ui.py` owns the compact Tk dialogs.
+
+### Health watchdog and incident invariants
+
+- The watchdog extends the existing Health model; do not create a second monitoring engine.
+- A target being OFFLINE is not application-health failure. Incidents must represent internal degradation only and must be fingerprint-deduplicated.
+- Incident details are secret-safe and must never contain endpoints, tokens, credentials, payloads, full config or target inventory.
+- Automatic recovery is bounded and rate-limited. Durable notification recovery must not duplicate delivery jobs.
+- Database recovery is non-destructive; never drop, recreate or delete operational data automatically.
+- Shutdown stops the watchdog before workers. Intentional worker/provider/tray shutdown must not create incidents.
+- A hidden window must not remain inaccessible after tray failure; restore it through the Tk main thread when safe.
+- Open incidents are never retention-pruned. Comments explain lifecycle, recovery, threading and failure-boundary invariants.
+- Health preferences may be portable; incident history, recovery counters and watchdog runtime state are not.
 
 Saved host records should remain backward-compatible with:
 

@@ -51,6 +51,11 @@ class BackupFormatTests(unittest.TestCase):
         for key in backup.PREFERENCES | backup.NOTIFICATIONS:
             self.assertEqual(self.payload["settings"][key], self.config[key])
 
+    def test_health_preferences_are_portable_with_defaults(self):
+        self.assertEqual(self.payload["settings"]["health_watchdog_enabled"], True)
+        self.assertEqual(self.payload["settings"]["health_notifications_enabled"], False)
+        self.assertEqual(self.payload["settings"]["health_auto_recovery_enabled"], True)
+
     def test_target_identity(self):
         self.assertEqual(self.payload["targets"][0]["host"], "192.0.2.10")
         self.assertEqual(self.payload["targets"][0]["port"], 443)

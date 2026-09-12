@@ -35,6 +35,16 @@
 
 JSON เดิมของ **Save List / Load List** ยังแยกต่างหากและทำงานเหมือนเดิม CSV เป็นรายงาน/รายการ **ไม่ใช่ไฟล์สำรองการตั้งค่า** การสำรองข้อมูลในเครื่องทั้งหมดอยู่นอกขอบเขต v1.12
 
+## Health Watchdog และประวัติ Incident (พัฒนา v1.13)
+
+แอปมี watchdog ภายในหนึ่งตัว เปิดใช้งานเป็นค่าเริ่มต้น และทำงานทุก 15 วินาทีผ่าน lifecycle ของ Tk เดิม เพื่อตรวจการทำงานของ Auto Refresh, worker/scheduler ของการแจ้งเตือน, คิวการแจ้งเตือน, การเข้าถึงฐานข้อมูล Event/Notification, scheduler ของ maintenance, tray และ config การที่เป้าหมาย TCP OFFLINE ไม่ใช่ความล้มเหลวของแอป และ Auto Refresh หรือ provider ที่ปิดโดยตั้งใจจะไม่สร้าง incident
+
+Health Incident History เก็บในตาราง `health_incidents` แยกจาก Event History และ Notification Delivery History ใน `events.db` เดิม มีระดับ INFO/WARNING/ERROR สถานะ OPEN/RESOLVED จำนวนครั้ง เวลาเห็นครั้งแรก/ล่าสุด และผลการกู้คืน เงื่อนไขเดียวกันจะรวมด้วย fingerprint ไม่สร้างแถวซ้ำ สามารถกรองและลบเฉพาะรายการ resolved ได้ เก็บ resolved ล่าสุด 5,000 รายการ และไม่ลบ open incident
+
+Application Settings มี **Internal watchdog** (เปิดเริ่มต้น), **Windows health notifications** (ปิดเริ่มต้น) และ **Safe automatic recovery** (เปิดเริ่มต้น) การแจ้งเตือนใช้ Windows path เดิม แจ้งเฉพาะครั้งแรก ระดับรุนแรงขึ้น หรือหายแล้ว ไม่แจ้งซ้ำทุก tick การกู้คืนอัตโนมัติจำกัดสองครั้งต่อเงื่อนไขและพัก 60 วินาที การกู้คืน worker รักษาสถานะ delivery ใน SQLite และไม่ enqueue ซ้ำแบบสุ่ม การกู้คืนฐานข้อมูลไม่ลบหรือตารางใหม่โดยอัตโนมัติ การหมดอายุ maintenance ใช้ path มาตรฐานเดิม หากซ่อนหน้าต่างแล้ว tray ใช้ไม่ได้ แอปจะแสดงหน้าต่างคืนบน Tk main thread
+
+Health / Diagnostics แสดงสถานะ watchdog จำนวน open warning/error เวลาของ incident ล่าสุด และปุ่ม Health Incident History diagnostics export ส่งออกเฉพาะ aggregate ไม่มีรายละเอียด incident, endpoint, credential, inventory หรือ payload Health preferences อยู่ใน Settings Backup ได้ แต่ incident, recovery counter และ runtime watchdog ไม่ portable ตอนปิดแอป watchdog จะหยุดก่อน worker เพื่อไม่สร้าง incident ปลอม
+
 ## ความสามารถ
 
 - Start with Windows แบบต่อผู้ใช้ และเลือกเริ่มแบบซ่อนใน System Tray ได้
