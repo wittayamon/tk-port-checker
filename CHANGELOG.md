@@ -2,21 +2,22 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased — recommended v1.13.0
+## v1.13.0 - 2026-09-12
 
 ### Added
 
 - Internal 15-second application watchdog with monitoring-stall, worker, queue, and database health checks.
 - Persistent, deduplicated Health Incident History in a separate `health_incidents` table in `events.db`.
 - Optional Windows-only health alerts for first occurrence, escalation, and recovery.
-- Bounded automatic recovery for the notification worker and future safe lifecycle actions.
+- Bounded automatic recovery for the notification worker, retry scheduler, and maintenance expiry reconciliation.
 - Health Incident History window with open/resolved status, occurrence counts, filtering, and Clear Resolved.
 
 ### Improved
 
 - Diagnostics now exposes aggregate incident counts and watchdog/recovery state without incident details or secrets.
 - Health preferences are included in portable Settings Backup; incident history and runtime watchdog state remain local.
-- Shutdown stops incident generation before intentional worker shutdown; watchdog recovery is rate-limited and database handling is non-destructive.
+- Monitoring stale cycles, retry queue backlog, failed deliveries, Event/Notification DB health, maintenance scheduling, and tray availability are surfaced as deduplicated incidents.
+- Shutdown stops incident generation before intentional worker shutdown; watchdog recovery is rate-limited, durable notification state is preserved, and database handling is non-destructive.
 
 ## v1.12.0 - 2026-09-11
 
